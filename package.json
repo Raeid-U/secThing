@@ -1,0 +1,26 @@
+{
+  "name": "secthing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted SEC filing research workbench",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "dev:backend": "npm run dev --workspace=@secthing/backend",
+    "dev:frontend": "npm run dev --workspace=@secthing/frontend",
+    "dev:worker": "npm run dev --workspace=@secthing/worker",
+    "start:backend": "npm run start --workspace=@secthing/backend",
+    "start:worker": "npm run start --workspace=@secthing/worker",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}

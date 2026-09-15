@@ -1,0 +1,11 @@
+{
+  "name": "@secthing/platform",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "postgres": "^3.4.5",
+    "zod": "^3.24.1"
+  }
+}
+

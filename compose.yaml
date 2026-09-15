@@ -1,0 +1,99 @@
+name: secthing
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-secthing}
+      POSTGRES_USER: ${POSTGRES_USER:-secthing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+
+  backend:
+    build:
+      context: .
+      target: development
+    command: ["sh", "-c", "npm run db:migrate && npm run start:backend"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATA_DIR: ${DATA_DIR:-/app/data}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      AI_MODE: ${AI_MODE:-disabled}
+      LOCAL_ONLY: ${LOCAL_ONLY:-true}
+      BACKEND_PORT: 8080
+    volumes:
+      - .:/app
+      - node-modules:/app/node_modules
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    networks: [internal]
+
+  worker:
+    build:
+      context: .
+      target: development
+    command: ["sh", "-c", "npm run db:migrate && npm run start:worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATA_DIR: ${DATA_DIR:-/app/data}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      AI_MODE: ${AI_MODE:-disabled}
+      LOCAL_ONLY: ${LOCAL_ONLY:-true}
+    volumes:
+      - .:/app
+      - node-modules:/app/node_modules
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  frontend:
+    build:
+      context: .
+      target: development
+    command: ["npm", "run", "start", "--workspace=@secthing/frontend"]
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+    volumes:
+      - .:/app
+      - node-modules:/app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    networks: [internal]
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama-cpu"]
+    volumes:
+      - ollama-data:/root/.ollama
+    networks: [internal]
+
+volumes:
+  postgres-data:
+  node-modules:
+  ollama-data:
+
+networks:
+  internal:
+    driver: bridge
+
