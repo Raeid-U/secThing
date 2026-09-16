@@ -155,6 +155,7 @@ h2 {
 }
 
 .service-list strong { color: var(--success); font-size: 0.8rem; }
+.service-list strong.is-muted { color: var(--muted); }
 .status-copy { max-width: 42rem; margin: 1.5rem 0 0; color: var(--muted); line-height: 1.5; }
 
 .home-content { align-self: center; padding: 4rem 0; }

@@ -23,4 +23,15 @@ describe("backend health", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ phase: 2, companyIngestion: false, ragChat: false });
   });
+
+  it("reports disabled AI without contacting a runtime", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/v1/system/ai/status" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ mode: "disabled", status: "disabled", models: [] });
+  });
+
+  it("does not run AI verification while AI is disabled", async () => {
+    const response = await app.inject({ method: "POST", url: "/api/v1/system/ai/verify" });
+    expect(response.statusCode).toBe(409);
+  });
 });

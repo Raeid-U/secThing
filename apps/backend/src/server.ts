@@ -5,8 +5,10 @@ import {
   assessReadiness,
   capabilities,
   connectDatabase,
+  inspectAiRuntime,
   loadConfig,
   type PlatformConfig,
+  verifyAiChat,
 } from "@secthing/platform";
 
 function isoDate(value: string | Date | null): string | undefined {
@@ -32,6 +34,18 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     return readiness;
   });
   app.get("/api/v1/system/capabilities", async () => capabilities(config));
+  app.get("/api/v1/system/ai/status", async () => inspectAiRuntime(config));
+  app.post("/api/v1/system/ai/verify", async (_request, reply) => {
+    const status = await inspectAiRuntime(config);
+    if (status.status === "disabled") return reply.code(409).send({ error: "AI is disabled. Set AI_MODE to local or external before verification." });
+    if (!status.chat.available) return reply.code(409).send({ error: "The configured chat model is unavailable.", status });
+    try {
+      const response = await verifyAiChat(config);
+      return { status: "verified" as const, model: response.model, response: response.content, totalDurationNs: response.totalDurationNs ?? null };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "AI verification failed." });
+    }
+  });
 
   app.post("/api/v1/companies", async (request, reply) => {
     if (!config.secUserAgent) return reply.code(503).send({ error: "SEC ingestion is unavailable until SEC_USER_AGENT includes a contact email." });

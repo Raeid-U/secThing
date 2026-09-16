@@ -18,4 +18,9 @@ describe("loadConfig", () => {
   it("rejects an SEC request rate over the documented ceiling", () => {
     expect(() => loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", SEC_RATE_LIMIT_PER_SECOND: "10.01" })).toThrow();
   });
+
+  it("requires an Ollama chat endpoint when AI is enabled", () => {
+    expect(() => loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "local" })).toThrow();
+    expect(loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "local", AI_CHAT_PROVIDER: "ollama", AI_CHAT_BASE_URL: "http://ollama:11434" })).toMatchObject({ aiMode: "local", aiChatProvider: "ollama" });
+  });
 });

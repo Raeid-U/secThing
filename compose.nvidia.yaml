@@ -1,0 +1,6 @@
+# Use with: docker compose -f compose.yaml -f compose.nvidia.yaml --profile ollama-nvidia up --build
+# Docker Desktop on Windows/WSL2 must have NVIDIA GPU support enabled first.
+services:
+  ollama:
+    profiles: ["ollama-nvidia"]
+    gpus: all

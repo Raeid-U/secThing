@@ -16,6 +16,36 @@ The backend is available on `http://localhost:8080`:
 
 The current metadata slice accepts a ticker and a filing start date, resolves the company by CIK, stores SEC identity/profile metadata, and catalogues filings without duplicating existing accessions. Filing-document download, parsing, search, and AI remain later phases.
 
+## Local AI runtime (Ollama)
+
+secThing can run Ollama as an optional Compose service, so no inference runtime is required on the host OS. The base stack stays AI-free; enable AI only after choosing local models in `.env`:
+
+```dotenv
+AI_MODE=local
+AI_CHAT_PROVIDER=ollama
+AI_CHAT_BASE_URL=http://ollama:11434
+AI_CHAT_MODEL=qwen2.5:3b
+AI_EMBEDDING_PROVIDER=ollama
+AI_EMBEDDING_BASE_URL=http://ollama:11434
+AI_EMBEDDING_MODEL=nomic-embed-text
+```
+
+For CPU-only use, start the profile and download the selected models into the persistent `ollama-data` volume:
+
+```bash
+docker compose --profile ollama-cpu up --build -d
+docker compose exec ollama ollama pull qwen2.5:3b
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+For the initial Windows 11 + Docker Desktop/WSL2 + NVIDIA path, install a current NVIDIA Windows driver and enable Docker GPU support, then use:
+
+```bash
+docker compose -f compose.yaml -f compose.nvidia.yaml --profile ollama-nvidia up --build -d
+```
+
+The backend reports runtime/model status at `GET /api/v1/system/ai/status`. `POST /api/v1/system/ai/verify` makes a fixed local diagnostic chat call after the configured model is available. It does not send company evidence or persist generated content. AMD/ROCm, Intel/Arc, vLLM, and llama.cpp are intentionally deferred to future deployment adapters.
+
 ## SEC data access
 
 secThing uses official SEC data APIs for public-company metadata and filing catalogues. It is not designed to scrape SEC website pages. Browser code never calls SEC endpoints directly.

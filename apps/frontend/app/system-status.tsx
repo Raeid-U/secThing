@@ -7,8 +7,18 @@ type Readiness = {
   checks: Array<{ name: string; status: "pass" | "fail"; detail?: string }>;
 };
 
+type AiStatus = {
+  mode: "disabled" | "local" | "external";
+  status: "disabled" | "unavailable" | "available";
+  detail?: string;
+  models: Array<{ name: string }>;
+  chat: { configuredModel?: string; available: boolean };
+  embeddings: { configuredModel?: string; available: boolean };
+};
+
 export function SystemStatus() {
   const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
@@ -23,6 +33,14 @@ export function SystemStatus() {
       .catch(() => {
         if (!cancelled) setUnavailable(true);
       });
+
+    void fetch("/api/v1/system/ai/status")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("AI status is unavailable");
+        const body = (await response.json()) as AiStatus;
+        if (!cancelled) setAiStatus(body);
+      })
+      .catch(() => undefined);
 
     return () => {
       cancelled = true;
@@ -52,6 +70,20 @@ export function SystemStatus() {
               <strong>{check.status === "pass" ? "Connected" : "Unavailable"}</strong>
             </li>
           ))}
+          {aiStatus && (
+            <li>
+              <span>Local AI</span>
+              <strong className={aiStatus.status === "available" ? "" : "is-muted"}>
+                {aiStatus.status === "disabled"
+                  ? "Disabled"
+                  : aiStatus.status === "unavailable"
+                    ? "Unavailable"
+                    : aiStatus.chat.available
+                      ? `Ready · ${aiStatus.chat.configuredModel}`
+                      : "Runtime ready · model needed"}
+              </strong>
+            </li>
+          )}
         </ul>
       )}
 
