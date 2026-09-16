@@ -1,6 +1,6 @@
 ---
 name: development-paper-trail
-description: Preserve durable software-project continuity across fresh Codex sessions by using plan.md, FRD.md, BRD-PRD.md, the latest incremental dev_log_N.md, and the current repository state. Use when implementing, debugging, refactoring, hardening, documenting, or otherwise materially changing an ongoing codebase. After meaningful work, write the next narrative development log describing what changed, why, decisions made, issues encountered, current system state, validation, and the recommended next direction. Git history remains user-controlled.
+description: Preserve durable software-project continuity across fresh Codex sessions by using plan.md, FRD.md, BRD-PRD.md, the latest published dev_log_N.md, a single rolling dev_context.md file for unpublished work, and the current repository state. Use when implementing, debugging, refactoring, hardening, documenting, or otherwise materially changing an ongoing codebase. Continuously preserve meaningful engineering context in dev_context.md, but create a new numbered development log only when the user explicitly asks for a dev log, session report, handoff, or equivalent publication. Git history remains user-controlled.
 ---
 
 # Development Paper Trail
@@ -15,16 +15,21 @@ The project should be recoverable primarily from:
 - `FRD.md`
 - `plan.md`
 - the latest numbered development log
+- `dev_context.md` when unpublished work exists
 - the current repository itself
 
-The development logs are incremental narrative records of the project as it evolves.
+This skill separates **working memory** from **published history**.
 
-They should preserve:
+`dev_context.md` is a single rolling, mutable context file. It preserves meaningful work completed since the most recent published development log. It may be updated repeatedly, condensed, reorganized, or rewritten as the work evolves. It is not a historical artifact and must never be numbered or duplicated simply because another prompt was completed.
+
+Numbered development logs are **session reports / publication checkpoints**. They consolidate the accumulated unpublished context into a durable narrative record only when the user explicitly asks for a dev log, session report, handoff, checkpoint, or equivalent.
+
+The accumulated context and eventual session report should preserve:
 
 - what state the project was in before the work;
-- why the new phase or change was needed;
+- why the work was needed;
 - what requirements or plan items drove it;
-- what was implemented;
+- what was implemented across the session;
 - what was added, changed, removed, or deliberately not added;
 - important design and business-rule decisions;
 - problems and failed approaches encountered;
@@ -34,9 +39,9 @@ They should preserve:
 - what is still missing, deferred, or risky; and
 - where the next development session should continue.
 
-The logs are not commit messages and are not a replacement for the repository.
+Development logs are not commit messages and are not a replacement for the repository.
 
-They are the project's **engineering memory**.
+`dev_context.md` is the project's **unpublished engineering memory**. Numbered dev logs are the project's **published engineering memory**.
 
 ---
 
@@ -45,15 +50,19 @@ They are the project's **engineering memory**.
 A new session should normally be able to do this:
 
 1. read the relevant requirement and planning documents;
-2. read the newest development log;
-3. inspect the relevant current code;
-4. understand the present implementation state;
-5. continue development safely; and
-6. write the next development log when meaningful work is complete.
+2. read the newest published development log;
+3. read `dev_context.md` if it exists and contains unpublished work;
+4. inspect the relevant current code;
+5. understand the present implementation state;
+6. continue development safely;
+7. update the rolling context as meaningful work occurs; and
+8. create the next numbered development log **only when the user explicitly requests one**.
 
 Do not make continuation depend on the previous chat.
 
 Do not make continuation depend on Git commit SHAs.
+
+Do not create a numbered development log merely because a prompt, task, feature, fix, or coding turn has completed.
 
 ---
 
@@ -65,11 +74,11 @@ Use the following hierarchy.
 
 The actual files in the working tree are the source of truth for what currently exists.
 
-A development log describes the state at the time it was written. The user may have edited files after that log.
+A development log or `dev_context.md` describes the state at the time it was written. The user may have edited files afterward.
 
-If the repository and a development log disagree, inspect the code and treat the repository as authoritative for implementation state.
+If the repository and written context disagree, inspect the code and treat the repository as authoritative for implementation state.
 
-Do not silently ignore the discrepancy. Record it in the next log if it matters.
+Do not silently ignore the discrepancy. Preserve it in `dev_context.md` when it matters, and include it in the next requested dev log if still relevant.
 
 ## 2. Requirement and planning documents
 
@@ -93,31 +102,45 @@ Do not rewrite requirements merely to make them match the implementation.
 
 If code and requirements diverge, identify the divergence.
 
-## 3. Development logs
+## 3. Rolling unpublished context — `dev_context.md`
 
-Development logs preserve historical context that is usually not obvious from code alone:
+When present, `dev_context.md` is the primary continuity source for work completed after the latest numbered dev log.
 
-- why an architecture was chosen;
-- business rules that were explicitly locked in;
+It should preserve durable context that is not reliably recoverable from code alone, including:
+
+- design and business-rule decisions;
 - implementation sequencing;
-- rejected approaches;
-- bugs discovered during implementation;
+- important user clarifications;
+- rejected or failed approaches;
+- bugs and diagnostic findings;
+- fixes and why they worked;
+- validation already performed;
 - temporary compromises;
 - scope boundaries;
-- validation milestones;
-- next-step reasoning.
+- unfinished work;
+- the current continuation point.
 
-## 4. Current chat
+It is mutable working memory, not a permanent historical record.
 
-Use the current chat for the immediate task, but do not leave an important project decision only in chat if it will matter later.
+## 4. Published development logs
 
-If the session establishes durable engineering context, capture it in the next development log.
+Development logs preserve consolidated historical context from earlier completed reporting periods.
+
+The newest published log should normally contain enough historical continuity that older logs do not all need to be loaded.
+
+## 5. Current chat
+
+Use the current chat for the immediate task, but do not leave important durable engineering context only in chat if it would matter in a fresh session.
+
+Capture meaningful durable context in `dev_context.md` as work progresses.
+
+Do **not** create a numbered development log simply to get information out of chat.
 
 ---
 
-# Development Log Naming
+# Development Log and Rolling Context Naming
 
-Preserve the repository's existing convention.
+Preserve the repository's existing numbered development-log convention.
 
 The preferred numbered convention is:
 
@@ -137,9 +160,24 @@ If no development-log convention exists, default to:
 
 in the repository root.
 
+For unpublished working context, use exactly one rolling file named:
+
+`dev_context.md`
+
+Place it alongside the development logs unless the repository already has an established location for project paper-trail documents.
+
+Rules for `dev_context.md`:
+
+- there must be at most one active rolling context file for this purpose;
+- update the existing file instead of creating `dev_context_2.md`, dated copies, checkpoint copies, or per-prompt files;
+- it may be rewritten or condensed as necessary to stay useful;
+- it should identify the latest published dev log it continues from, when one exists;
+- it is not a formal dev log and does not consume a dev-log number;
+- after a requested dev log is published, reset it to a short clean state that points to the newly published log, or remove stale unpublished details if nothing remains outstanding.
+
 Never overwrite a previous numbered development log with new project history.
 
-The log number, not a commit SHA, is the primary continuity marker.
+The log number, not a commit SHA, is the primary published continuity marker.
 
 ---
 
@@ -155,29 +193,36 @@ Locate, when present:
 - `FRD.md`
 - `plan.md`
 - the numbered development logs
+- `dev_context.md`
 - any project-specific design or architecture documents relevant to the request
 
 Do not create missing requirement documents merely because this skill references them.
 
-## Step 2 — Read the newest development log first
+## Step 2 — Read the newest published development log and rolling context
 
 Determine the highest numbered existing development log and read it.
 
-The newest log should be treated as the primary historical continuity document.
+Then read `dev_context.md` if it exists.
+
+Interpret them together:
+
+- the newest numbered log is the latest **published** historical checkpoint;
+- `dev_context.md` contains **unpublished work since that checkpoint**;
+- the repository remains authoritative for what actually exists now.
 
 Do **not** automatically load the entire development-log history.
 
 Older logs should be read only when:
 
-- the newest log explicitly points back to a prior decision;
+- the newest log or `dev_context.md` explicitly points back to a prior decision;
 - the current task concerns an older subsystem whose rationale is not adequately carried forward;
 - a contradiction needs to be resolved;
 - the user asks about earlier history; or
-- the newest log is unusually small or incomplete.
+- the newest continuity documents are unusually small or incomplete.
 
 This is deliberate.
 
-Each new development log should carry forward enough current-state context that future sessions usually do not need every earlier log.
+Each requested development log should carry forward enough current-state context that future sessions usually do not need every earlier log.
 
 ## Step 3 — Read the relevant requirements and plan sections
 
@@ -224,6 +269,7 @@ The purpose is to understand the working tree, not to manage Git history.
 Before editing, be able to answer:
 
 - What is already implemented?
+- What unpublished work is recorded in `dev_context.md`?
 - What remains incomplete?
 - What requirements govern this work?
 - What prior design decisions must be preserved?
@@ -241,7 +287,9 @@ The purpose of the paper trail is to reduce catch-up cost.
 
 Perform the user's engineering task normally.
 
-While working, keep track of durable context that a future session would otherwise have to rediscover.
+While working, maintain `dev_context.md` as a **rolling context buffer** for durable information a future agent would otherwise have to rediscover.
+
+Update it after meaningful work or before ending a substantive turn/session. Do not treat every user prompt as a publication boundary, and do not create a numbered development log as part of ordinary implementation work.
 
 Especially preserve:
 
@@ -262,47 +310,65 @@ Especially preserve:
 - important error messages when diagnostically useful;
 - fixes and why they worked;
 - test-suite changes;
+- validation actually performed;
 - compatibility implications;
 - intentional non-goals;
 - temporary limitations;
-- deferred work.
+- deferred work;
+- unfinished work and the safest continuation point;
+- important user clarifications or decisions that affect later implementation.
 
-Do not turn the development log into a raw transcript of the coding session.
+Do not turn `dev_context.md` into a raw transcript of the coding session.
 
-Capture the engineering story, not every command.
+Capture the engineering story, not every command or conversational exchange.
+
+As the context file grows, consolidate repeated or superseded notes. Preserve the final decision and useful history of how difficult problems were resolved, but remove conversational noise and obsolete intermediate wording.
 
 ---
 
-# When to Write the Next Development Log
+# When to Publish the Next Development Log
 
-Write the next numbered development log before finishing the session when the work materially changes or clarifies project state.
+Create the next numbered development log **only when the user explicitly asks for one**.
 
-Examples include:
+Examples of an explicit request include:
 
-- implementing a feature;
-- adding or changing an API;
-- changing a schema or migration;
-- fixing a meaningful bug;
-- changing authorization or business rules;
-- performing a meaningful refactor;
-- hardening security or deployment behavior;
-- adding an operational workflow;
-- changing dependencies or infrastructure;
-- adding a meaningful test slice;
-- completing a planned milestone;
-- changing or clarifying the intended architecture;
-- discovering a constraint that will materially affect later work;
-- completing substantial investigation that should not be repeated.
+- "make a dev log";
+- "write the dev log";
+- "give me a session report";
+- "create the handoff";
+- "checkpoint this work";
+- "summarize this development session into the paper trail";
+- equivalent language that clearly requests publication of the accumulated engineering context.
 
-A trivial typo or tiny isolated formatting change does not necessarily require a new log.
+Do **not** infer a request merely because:
 
-Use judgment.
+- a feature was implemented;
+- a bug was fixed;
+- a milestone was reached;
+- tests passed;
+- the user says "thanks" or appears finished;
+- the task was substantial;
+- a fresh prompt begins;
+- the current coding turn is ending;
+- the agent believes a checkpoint would be useful.
 
-The goal is not "one log per prompt."
+Until the user requests publication, keep accumulating and consolidating durable context in `dev_context.md`.
 
-The goal is **one log per meaningful increment of engineering state**.
+When the user does request a dev log:
 
-A single log may cover multiple closely related steps completed in the same cohesive phase.
+1. read the newest published dev log;
+2. read the full current `dev_context.md`;
+3. inspect the relevant final repository state and changes;
+4. review the requirements and plan items affected;
+5. incorporate important context from the current chat that has not yet been captured;
+6. produce the next numbered dev log as a **consolidated session report**, not a prompt-by-prompt chronology;
+7. include what was achieved, why, decisions, issues, failed approaches, resolutions, validation, current state, unfinished work, and next direction;
+8. make the report truthful about what was and was not tested;
+9. after publication, reset `dev_context.md` so it points to the new published log and contains only genuinely unpublished or still-active context.
+
+A single requested dev log may therefore cover many prompts, multiple features, several fixes, debugging work, and iterative refinements.
+
+The publication boundary is controlled by the user, not by the agent.
 
 ---
 
@@ -837,11 +903,11 @@ This section may be shortened or omitted for a very small log when it would add 
 
 ---
 
-# Small Checkpoint Logs
+# Short Requested Session Reports
 
-Not every useful development record needs hundreds of lines.
+A user-requested development log does not need to be hundreds of lines merely because it consolidates a session.
 
-A short checkpoint log is appropriate when the session primarily records:
+A short report is appropriate when the accumulated unpublished context primarily records:
 
 - deferred production work;
 - a compact deployment note;
@@ -849,19 +915,21 @@ A short checkpoint log is appropriate when the session primarily records:
 - a small but important verification result;
 - a set of "revisit before production" items.
 
-A checkpoint may be much shorter than the full structure.
+The report may be much shorter than the full structure.
 
 The requirement is durable usefulness, not length.
 
-Do not inflate a small increment into a large document simply to satisfy a template.
+Do not inflate a small reporting period into a large document simply to satisfy a template.
+
+This does **not** create an automatic checkpoint trigger. A short dev log is still written only when the user asks for one.
 
 ---
 
 # Unfinished or Interrupted Work
 
-If meaningful work is left partially complete, write the development log honestly.
+If meaningful work is left partially complete, preserve that fact in `dev_context.md` before the session ends.
 
-State:
+Record:
 
 - what was completed;
 - what is partially changed;
@@ -870,6 +938,8 @@ State:
 - what is broken or unverified;
 - what still needs implementation;
 - the safest next action.
+
+If the user requests a dev log while work is unfinished, carry this information into the published report honestly.
 
 Do not write an "exit condition complete" section when the exit condition was not met.
 
@@ -894,7 +964,7 @@ When a requirement document appears inconsistent with the requested implementati
 
 1. identify the mismatch;
 2. follow the user's explicit current instruction when clear;
-3. record the divergence in the development log;
+3. record the divergence in `dev_context.md`, and carry it into the next requested development log when still relevant;
 4. update the source document only when authorized or clearly part of the task.
 
 Development logs record history.
@@ -954,36 +1024,60 @@ If the user specifically asks for Git assistance, follow that instruction separa
 
 # Avoiding Context Bloat
 
-This system exists specifically to reduce long-context dependence.
+This system exists specifically to reduce long-context dependence without producing a new file after every prompt.
 
 Therefore:
 
-- read the newest dev log first;
+- read the newest published dev log first;
+- then read `dev_context.md` for unpublished work;
 - do not automatically read all earlier logs;
+- keep only one rolling `dev_context.md`;
+- consolidate duplicate or superseded notes inside `dev_context.md`;
 - do not reproduce earlier logs inside the newest log;
-- do not copy full requirements into logs;
+- do not copy full requirements into context or logs;
 - do not paste full diffs;
 - do not paste entire source files;
 - do not repeat stable background unless needed for continuity;
 - summarize older phases at a higher level as the project matures;
-- preserve the decisions that matter, not every historical detail.
+- preserve the decisions, problems, fixes, validation, and state transitions that matter, not every conversational detail.
 
-A good new log should make the next fresh session require **less** context than the current one.
+A good rolling context file should make a fresh session immediately aware of unpublished work.
+
+A good requested dev log should consolidate that context so the next reporting period can start cleanly.
+
+---
+
+# Quality Standard for Rolling Context
+
+A useful `dev_context.md` should let a fresh capable coding agent answer:
+
+- Which published dev log does this unpublished work continue from?
+- What has been changed since that log?
+- Why were those changes made?
+- What important user decisions or clarifications were given?
+- What problems or failed approaches occurred?
+- How were those problems resolved?
+- What validation has actually been performed?
+- What remains unfinished, risky, or deferred?
+- What should be inspected or continued next?
+
+It does not need polished prose. It does need accurate durable engineering context.
 
 ---
 
 # Quality Standard for Development Logs
 
-A strong development log should let a fresh capable coding agent answer:
+A strong requested development log should let a fresh capable coding agent answer:
 
 - What project am I in?
-- What phase are we at?
-- What did the previous phase leave behind?
-- Why was the most recent work necessary?
+- What reporting period or phase does this log cover?
+- What did the previous published phase leave behind?
+- Why was the accumulated work necessary?
 - Which requirements or plan items does it serve?
-- What exactly was implemented?
+- What exactly was implemented across the reporting period?
 - What important rules or architecture decisions are now locked in?
 - What failed or caused trouble?
+- How were those issues resolved?
 - What validation was actually performed?
 - What is implemented now?
 - What is still missing?
@@ -996,25 +1090,28 @@ If the log cannot answer those questions, it is probably too vague.
 
 # End-of-Session Procedure
 
-Before finishing a substantive engineering session:
+Before finishing a substantive engineering session or turn:
 
 1. inspect the final relevant repository state;
 2. review the actual changes made;
 3. run appropriate validation where possible;
 4. compare the result against the relevant requirements and `plan.md`;
-5. determine whether the work constitutes a meaningful new development increment;
-6. if yes, create the next numbered development log;
-7. make the log truthful about tests, unfinished work, and scope;
-8. ensure the log contains enough current-state information for a fresh session;
-9. do not perform a Git commit solely because a log was created.
+5. update `dev_context.md` with any durable engineering context not already captured;
+6. consolidate stale, duplicated, or superseded context so the rolling file remains useful;
+7. record tests truthfully, including failures, unverified areas, and unfinished work;
+8. ensure `dev_context.md` contains enough current-state information for a fresh session;
+9. do **not** create a numbered development log unless the user explicitly requested one;
+10. do not perform a Git commit solely because context or a dev log was updated.
+
+If the user explicitly requested a dev log during the session, publish it using the accumulated context and final repository state, then reset `dev_context.md` to reflect the new published baseline and any work that remains unpublished.
 
 In the final response to the user, briefly mention:
 
 - what was completed;
 - validation status;
-- the new development-log filename when one was created;
-- any important unresolved issue.
+- important unresolved issues;
+- the new development-log filename **only when the user asked for and received a dev log**.
 
 Do not make the user manage agent handoff metadata.
 
-The development log is the handoff.
+`dev_context.md` is the ongoing handoff between publication points. The numbered development log is the user-triggered session report.
