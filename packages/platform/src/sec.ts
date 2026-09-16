@@ -123,7 +123,8 @@ export function isSupportedMvpForm(form: string): boolean {
 }
 
 export class SecClient {
-  private lastRequestAt = 0;
+  private static requestTail = Promise.resolve();
+  private static nextRequestAt = 0;
 
   constructor(
     private readonly options: { dataDir: string; userAgent?: string; rateLimitPerSecond: number; fetch?: FetchLike },
@@ -221,10 +222,18 @@ export class SecClient {
   }
 
   private async waitForRateLimit(): Promise<void> {
+    const priorRequest = SecClient.requestTail;
+    let releaseRequest: () => void;
+    SecClient.requestTail = new Promise<void>((resolve) => { releaseRequest = resolve; });
+    await priorRequest;
     const minimumInterval = Math.ceil(1_000 / this.options.rateLimitPerSecond);
-    const wait = this.lastRequestAt + minimumInterval - Date.now();
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    this.lastRequestAt = Date.now();
+    try {
+      const wait = SecClient.nextRequestAt - Date.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      SecClient.nextRequestAt = Date.now() + minimumInterval;
+    } finally {
+      releaseRequest!();
+    }
   }
 
   private async backoff(attempt: number): Promise<void> {

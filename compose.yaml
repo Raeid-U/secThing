@@ -25,6 +25,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       DATA_DIR: ${DATA_DIR:-/app/data}
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      SEC_RATE_LIMIT_PER_SECOND: ${SEC_RATE_LIMIT_PER_SECOND:-5}
       AI_MODE: ${AI_MODE:-disabled}
       LOCAL_ONLY: ${LOCAL_ONLY:-true}
       BACKEND_PORT: 8080
@@ -53,6 +54,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       DATA_DIR: ${DATA_DIR:-/app/data}
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      SEC_RATE_LIMIT_PER_SECOND: ${SEC_RATE_LIMIT_PER_SECOND:-5}
       AI_MODE: ${AI_MODE:-disabled}
       LOCAL_ONLY: ${LOCAL_ONLY:-true}
     volumes:

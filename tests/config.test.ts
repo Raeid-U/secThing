@@ -14,5 +14,8 @@ describe("loadConfig", () => {
   it("rejects an invalid database URL", () => {
     expect(() => loadConfig({ DATABASE_URL: "not-a-url" })).toThrow();
   });
-});
 
+  it("rejects an SEC request rate over the documented ceiling", () => {
+    expect(() => loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", SEC_RATE_LIMIT_PER_SECOND: "10.01" })).toThrow();
+  });
+});

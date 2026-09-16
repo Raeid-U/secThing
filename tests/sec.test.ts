@@ -10,13 +10,15 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 async function clientFor(responses: Record<string, unknown>) {
   const dataDir = await mkdtemp(join(tmpdir(), "secthing-sec-test-"));
   directories.push(dataDir);
+  const requestedAt: number[] = [];
   const fetch = vi.fn(async (url: string | URL | Request) => {
+    requestedAt.push(Date.now());
     const body = responses[String(url)];
     return body === undefined
       ? new Response("not found", { status: 404 })
       : new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   });
-  return { client: new SecClient({ dataDir, userAgent: "secThing tests@example.com", rateLimitPerSecond: 10, fetch: fetch as typeof globalThis.fetch }), fetch };
+  return { client: new SecClient({ dataDir, userAgent: "secThing tests@example.com", rateLimitPerSecond: 10, fetch: fetch as typeof globalThis.fetch }), fetch, requestedAt };
 }
 
 describe("SEC identity and submissions client", () => {
@@ -26,6 +28,15 @@ describe("SEC identity and submissions client", () => {
     });
     await expect(client.resolveTicker("linc")).resolves.toMatchObject({ match: { cik: 1286613, ticker: "LINC" } });
     expect(canonicalCik(1286613)).toBe("0001286613");
+  });
+
+  it("serializes concurrent SEC requests at the configured ceiling", async () => {
+    const { client, requestedAt } = await clientFor({
+      "https://www.sec.gov/files/company_tickers.json": { "0": { cik_str: 1286613, ticker: "LINC", title: "Lincoln Educational Services Corporation" } },
+    });
+    await Promise.all([client.resolveTicker("LINC"), client.resolveTicker("LINC")]);
+    expect(requestedAt).toHaveLength(2);
+    expect(requestedAt[1] - requestedAt[0]).toBeGreaterThanOrEqual(95);
   });
 
   it("combines recent and historical submission metadata", async () => {
