@@ -1,6 +1,6 @@
 # secThing
 
-Self-hosted, evidence-first SEC filing research workbench. See `BRD-PRD.md` and `FRD.md` for the authoritative product and technical requirements.
+Self-hosted, evidence-first SEC filing research workbench. See [docs/BRD-PRD.md](docs/BRD-PRD.md) and [docs/FRD.md](docs/FRD.md) for the authoritative product and technical requirements.
 
 ## Phase 1: Run the foundation
 
