@@ -56,4 +56,28 @@ describe("SEC identity and submissions client", () => {
     expect(isSupportedMvpForm("10-Q/A")).toBe(true);
     expect(isSupportedMvpForm("DEF 14A")).toBe(false);
   });
+
+  it("preserves filing-array alignment while treating empty optional fields as absent", async () => {
+    const { client } = await clientFor({
+      "https://data.sec.gov/submissions/CIK0001286613.json": {
+        name: "Lincoln Educational Services Corporation",
+        filings: {
+          recent: {
+            accessionNumber: ["0001", "0002"],
+            form: ["8-K", "SCHEDULE 13G/A"],
+            filingDate: ["2026-08-10", "2026-07-29"],
+            reportDate: ["2026-08-10", ""],
+            primaryDocument: ["event.htm", "primary.xml"],
+            items: ["2.02", ""],
+          },
+          files: [],
+        },
+      },
+    });
+    const submission = await client.fetchCompanySubmission(1286613);
+    expect(submission.filings).toEqual([
+      expect.objectContaining({ accessionNumber: "0001", reportDate: "2026-08-10", items: "2.02" }),
+      expect.objectContaining({ accessionNumber: "0002", reportDate: undefined, primaryDocument: "primary.xml", items: undefined }),
+    ]);
+  });
 });

@@ -9,6 +9,11 @@ import {
   type PlatformConfig,
 } from "@secthing/platform";
 
+function isoDate(value: string | Date | null): string | undefined {
+  if (value === null) return undefined;
+  return typeof value === "string" ? value.slice(0, 10) : value.toISOString().slice(0, 10);
+}
+
 export function buildServer(config: PlatformConfig = loadConfig()) {
   const app = Fastify({ logger: true });
   const sql = connectDatabase(config.databaseUrl);
@@ -33,7 +38,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     const parsed = companyRequest.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Ticker and an ISO start date are required.", details: parsed.error.flatten() });
     const { ticker, startDate } = parsed.data;
-    const existing = await sql<{ id: number; cik: number; earliest_requested_filing_date: string | null }[]>`
+    const existing = await sql<{ id: number; cik: number; earliest_requested_filing_date: string | Date | null }[]>`
       SELECT companies.id, companies.cik, companies.earliest_requested_filing_date
       FROM companies
       JOIN company_ticker_aliases ON company_ticker_aliases.company_id = companies.id
@@ -41,7 +46,8 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       LIMIT 1
     `;
     const company = existing[0];
-    const shouldExpand = Boolean(company && (!company.earliest_requested_filing_date || startDate < company.earliest_requested_filing_date));
+    const earliestRequestedDate = company ? isoDate(company.earliest_requested_filing_date) : undefined;
+    const shouldExpand = Boolean(company && (!earliestRequestedDate || startDate < earliestRequestedDate));
     if (company && !shouldExpand) {
       const latestJob = await sql<{ id: number; status: string; progress: unknown }[]>`
         SELECT id, status, progress FROM jobs WHERE company_id = ${company.id} ORDER BY id DESC LIMIT 1

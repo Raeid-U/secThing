@@ -67,7 +67,11 @@ function asString(value: unknown): string | undefined {
 }
 
 function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function asOptionalStringArray(value: unknown): Array<string | undefined> {
+  return Array.isArray(value) ? value.map(asString) : [];
 }
 
 function asAddress(value: unknown): SecAddress | undefined {
@@ -88,19 +92,19 @@ function asAddress(value: unknown): SecAddress | undefined {
 function filingRows(raw: unknown): SubmissionFiling[] {
   if (!raw || typeof raw !== "object") return [];
   const object = raw as Record<string, unknown>;
-  const accessions = asStringArray(object.accessionNumber);
-  const forms = asStringArray(object.form);
-  const dates = asStringArray(object.filingDate);
-  const reportDates = asStringArray(object.reportDate);
-  const primaryDocuments = asStringArray(object.primaryDocument);
-  const items = asStringArray(object.items);
+  const accessions = asOptionalStringArray(object.accessionNumber);
+  const forms = asOptionalStringArray(object.form);
+  const dates = asOptionalStringArray(object.filingDate);
+  const reportDates = asOptionalStringArray(object.reportDate);
+  const primaryDocuments = asOptionalStringArray(object.primaryDocument);
+  const items = asOptionalStringArray(object.items);
   const xbrl = Array.isArray(object.isXBRL) ? object.isXBRL : [];
   const inlineXbrl = Array.isArray(object.isInlineXBRL) ? object.isInlineXBRL : [];
 
   return accessions.flatMap((accessionNumber, index) => {
     const form = forms[index];
     const filingDate = dates[index];
-    if (!form || !filingDate) return [];
+    if (!accessionNumber || !form || !filingDate) return [];
     return [{
       accessionNumber,
       form,
