@@ -18,10 +18,9 @@ describe("backend health", () => {
     expect(response.json()).toEqual({ status: "ok" });
   });
 
-  it("advertises Phase 1 feature capabilities", async () => {
+  it("advertises current capability state", async () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/system/capabilities" });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ phase: 1, companyIngestion: false, ragChat: false });
+    expect(response.json()).toMatchObject({ phase: 2, companyIngestion: false, ragChat: false });
   });
 });
-

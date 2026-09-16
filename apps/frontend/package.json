@@ -3,17 +3,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build",
-    "check": "tsc -b --pretty false",
-    "dev": "vite --host 0.0.0.0",
-    "start": "vite --host 0.0.0.0"
+    "build": "next build",
+    "check": "tsc --noEmit",
+    "dev": "next dev --webpack --hostname 0.0.0.0 --port 3000",
+    "start": "next start --hostname 0.0.0.0 --port 3000"
   },
   "dependencies": {
+    "next": "16.3.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5"
+    "@types/react-dom": "^18.3.5",
+    "tailwindcss": "^4.3.3"
   }
 }

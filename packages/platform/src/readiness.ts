@@ -41,19 +41,18 @@ export async function assessWorkerReadiness(config: PlatformConfig): Promise<Rea
   const readiness = await assessReadiness(config);
   const secConfig: Check = config.secUserAgent
     ? { name: "SEC configuration", status: "pass" }
-    : { name: "SEC configuration", status: "pass", detail: "Not yet required because SEC acquisition is disabled in Phase 1." };
+    : { name: "SEC configuration", status: "fail", detail: "SEC_USER_AGENT with a contact email is required for company ingestion." };
   const checks = [...readiness.checks, secConfig];
-  return { status: readiness.status, checks };
+  return { status: checks.every((check) => check.status === "pass") ? "ready" : "not_ready", checks };
 }
 
 export function capabilities(config: PlatformConfig) {
   return {
-    companyIngestion: false,
+    companyIngestion: Boolean(config.secUserAgent),
     filingSearch: false,
     ragChat: false,
     aiMode: config.aiMode,
     localOnly: config.localOnly,
-    phase: 1,
+    phase: 2,
   };
 }
-
