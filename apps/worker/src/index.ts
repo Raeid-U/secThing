@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { connectDatabase, assessWorkerReadiness, isSupportedMvpForm, loadConfig, SecClient, type CompanySubmission } from "@secthing/platform";
+import { createHash, randomUUID } from "node:crypto";
+import { connectDatabase, assessWorkerReadiness, FilingParser, filingParserVersion, isSupportedMvpForm, loadConfig, SecClient, type CompanySubmission } from "@secthing/platform";
 import type { Sql } from "postgres";
 
 const config = loadConfig();
@@ -13,10 +13,12 @@ console.info(JSON.stringify({ event: "worker.ready", checks: readiness.checks })
 const sql = connectDatabase(config.databaseUrl);
 const workerId = `worker-${randomUUID()}`;
 const sec = new SecClient({ dataDir: config.dataDir, userAgent: config.secUserAgent, rateLimitPerSecond: config.secRateLimitPerSecond });
+const parser = new FilingParser();
 
-type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata" | "acquire_filing_source"; company_id: number | null; filing_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
+type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata" | "acquire_filing_source" | "parse_filing_source"; company_id: number | null; filing_id: number | null; document_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
 type Company = { id: number; cik: number };
 type SourceFiling = { id: number; cik: number; accession_number: string; form_type: string; primary_document: string | null };
+type ParseDocument = { id: number; filing_id: number; form_type: string; local_path: string; content_type: string | null; content_hash: string };
 
 async function storeResponse(response: { url: string; status: number; contentType: string | null; bodyPath: string; contentHash: string }) {
   await sql`
@@ -37,7 +39,7 @@ async function claimWork(): Promise<WorkItem | undefined> {
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    RETURNING id, job_id, work_type, company_id, filing_id, attempt_count, input
+    RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, input
   `;
   return claimed[0];
 }
@@ -168,30 +170,112 @@ async function acquireFilingSource(item: WorkItem): Promise<void> {
     primaryDocument: filing.primary_document ?? undefined,
   });
   await storeResponse(document.indexResponse);
-  await sql`
+  const documents = await sql<{ id: number }[]>`
     INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size, status, fetched_at)
     VALUES (${filing.id}, ${document.documentName}, ${document.documentType}, ${document.url}, ${document.bodyPath}, ${document.contentType}, ${document.contentHash}, ${document.byteSize}, 'downloaded', now())
     ON CONFLICT (filing_id, document_name) DO UPDATE SET
       document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
       content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
       status = 'downloaded', last_error = NULL, fetched_at = now(), updated_at = now()
+    RETURNING id
   `;
   await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
+  await queueParsing(item.job_id, item.company_id, filing.id, documents[0].id);
 }
 
-async function refreshSourceAcquisitionProgress(jobId: number): Promise<void> {
-  const rows = await sql<{ queued: number; complete: number; failed: number }[]>`
-    SELECT count(*) FILTER (WHERE status IN ('pending', 'running'))::integer AS queued,
-      count(*) FILTER (WHERE status = 'complete')::integer AS complete,
-      count(*) FILTER (WHERE status = 'failed')::integer AS failed
-    FROM work_items WHERE job_id = ${jobId} AND work_type = 'acquire_filing_source'
+async function queueParsing(jobId: number, companyId: number | null, filingId: number, documentId: number): Promise<void> {
+  await sql`
+    INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
+    SELECT ${jobId}, 'parse_filing_source', ${companyId}, ${filingId}, ${documentId}, '{}'::jsonb
+    WHERE NOT EXISTS (
+      SELECT 1 FROM normalized_documents
+      JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
+      WHERE normalized_documents.document_id = ${documentId}
+        AND normalized_documents.parser_version = ${filingParserVersion}
+        AND normalized_documents.status = 'parsed'
+        AND normalized_documents.source_content_hash = filing_documents.content_hash
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM work_items
+        WHERE work_items.job_id = ${jobId}
+          AND work_items.work_type = 'parse_filing_source'
+          AND work_items.document_id = ${documentId}
+      )
+  `;
+}
+
+async function parseFilingSource(item: WorkItem): Promise<void> {
+  if (!item.document_id || !item.filing_id) throw new Error("Parse work item is missing a document or filing.");
+  const documents = await sql<ParseDocument[]>`
+    SELECT filing_documents.id, filing_documents.filing_id, filings.form_type, filing_documents.local_path,
+      filing_documents.content_type, filing_documents.content_hash
+    FROM filing_documents JOIN filings ON filings.id = filing_documents.filing_id
+    WHERE filing_documents.id = ${item.document_id}
+  `;
+  const document = documents[0];
+  if (!document?.local_path || !document.content_hash) throw new Error("Downloaded filing source is missing its local path or content hash.");
+  const parsed = await parser.parse({ sourcePath: document.local_path, contentType: document.content_type, formType: document.form_type, dataDir: config.dataDir });
+  await sql.begin(async (transaction) => {
+    const normalized = await transaction<{ id: number }[]>`
+      INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, warnings)
+      VALUES (${document.id}, ${filingParserVersion}, ${document.content_hash}, ${parsed.normalizedTextPath}, ${parsed.textHash}, ${parsed.textLength}, 'parsed', ${transaction.json(parsed.warnings)})
+      ON CONFLICT (document_id, parser_version) DO UPDATE SET
+        source_content_hash = EXCLUDED.source_content_hash, normalized_text_path = EXCLUDED.normalized_text_path,
+        text_hash = EXCLUDED.text_hash, text_length = EXCLUDED.text_length, status = 'parsed', warnings = EXCLUDED.warnings,
+        parsed_at = now(), updated_at = now()
+      RETURNING id
+    `;
+    const normalizedDocumentId = normalized[0].id;
+    await transaction`DELETE FROM filing_sections WHERE document_id = ${document.id}`;
+    await transaction`DELETE FROM source_spans WHERE normalized_document_id = ${normalizedDocumentId}`;
+    const fullSpan = await transaction<{ id: number }[]>`
+      INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind)
+      VALUES (${normalizedDocumentId}, 0, ${parsed.textLength}, ${parsed.textHash}, 'document') RETURNING id
+    `;
+    if (parsed.sections.length === 0) {
+      await transaction`
+        INSERT INTO filing_sections (filing_id, document_id, section_type, section_label, source_span_id, confidence_status)
+        VALUES (${document.filing_id}, ${document.id}, 'unknown', 'Full document', ${fullSpan[0].id}, 'not_found')
+      `;
+    } else {
+      for (const section of parsed.sections) {
+        const span = await transaction<{ id: number }[]>`
+          INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind)
+          VALUES (${normalizedDocumentId}, ${section.startOffset}, ${section.endOffset}, ${createHash("sha256").update(parsed.text.slice(section.startOffset, section.endOffset)).digest("hex")}, 'section')
+          RETURNING id
+        `;
+        await transaction`
+          INSERT INTO filing_sections (filing_id, document_id, section_type, section_label, source_span_id, confidence_status)
+          VALUES (${document.filing_id}, ${document.id}, ${section.sectionType}, ${section.label}, ${span[0].id}, ${section.confidenceStatus})
+        `;
+      }
+    }
+  });
+  await sql`UPDATE filings SET filing_status = 'parsed', updated_at = now() WHERE id = ${document.filing_id}`;
+}
+
+async function refreshPipelineProgress(jobId: number): Promise<void> {
+  const rows = await sql<{ source_queued: number; source_complete: number; source_failed: number; parse_queued: number; parse_complete: number; parse_failed: number }[]>`
+    SELECT
+      count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status IN ('pending', 'running'))::integer AS source_queued,
+      count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status = 'complete')::integer AS source_complete,
+      count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status = 'failed')::integer AS source_failed,
+      count(*) FILTER (WHERE work_type = 'parse_filing_source' AND status IN ('pending', 'running'))::integer AS parse_queued,
+      count(*) FILTER (WHERE work_type = 'parse_filing_source' AND status = 'complete')::integer AS parse_complete,
+      count(*) FILTER (WHERE work_type = 'parse_filing_source' AND status = 'failed')::integer AS parse_failed
+    FROM work_items WHERE job_id = ${jobId}
   `;
   const progress = rows[0];
-  const status = progress.failed > 0 ? 'partial' : progress.queued > 0 ? 'running' : 'complete';
+  const failed = progress.source_failed + progress.parse_failed;
+  const queued = progress.source_queued + progress.parse_queued;
+  const status = failed > 0 ? 'partial' : queued > 0 ? 'running' : 'complete';
   await sql`
     UPDATE jobs
     SET status = ${status},
-        progress = progress || ${sql.json({ sourceAcquisition: { status: status === 'complete' ? 'complete' : status, queued: progress.queued, complete: progress.complete, failed: progress.failed } })},
+        progress = progress || ${sql.json({
+          sourceAcquisition: { status: progress.source_failed > 0 ? 'partial' : progress.source_queued > 0 ? 'running' : 'complete', queued: progress.source_queued, complete: progress.source_complete, failed: progress.source_failed },
+          parsing: { status: progress.parse_failed > 0 ? 'partial' : progress.parse_queued > 0 ? 'running' : 'complete', queued: progress.parse_queued, complete: progress.parse_complete, failed: progress.parse_failed },
+        })},
         updated_at = now()
     WHERE id = ${jobId}
   `;
@@ -207,7 +291,7 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
   await sql`
     UPDATE work_items
     SET status = ${retry ? 'pending' : 'failed'}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
-        error_code = ${item.work_type === 'acquire_filing_source' ? 'source_acquisition_failed' : 'sec_ingestion_failed'}, error_message = ${message}, updated_at = now()
+        error_code = ${item.work_type === 'acquire_filing_source' ? 'source_acquisition_failed' : item.work_type === 'parse_filing_source' ? 'filing_parse_failed' : 'sec_ingestion_failed'}, error_message = ${message}, updated_at = now()
     WHERE id = ${item.id}
   `;
   await sql`UPDATE jobs SET status = ${retry ? 'running' : 'partial'}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
@@ -226,14 +310,15 @@ const idleLoop = setInterval(() => {
     try {
       if (item.work_type === "resolve_company") await resolveCompany(item);
       else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
-      else await acquireFilingSource(item);
+      else if (item.work_type === "acquire_filing_source") await acquireFilingSource(item);
+      else await parseFilingSource(item);
       await completeWork(item);
-      if (item.work_type === "acquire_filing_source") await refreshSourceAcquisitionProgress(item.job_id);
+      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source") await refreshPipelineProgress(item.job_id);
       console.info(JSON.stringify({ event: "worker.work_complete", workItemId: item.id, jobId: item.job_id, workType: item.work_type }));
     } catch (error) {
       console.error(JSON.stringify({ event: "worker.work_exception", workItemId: item.id, jobId: item.job_id, workType: item.work_type, stack: error instanceof Error ? error.stack : undefined }));
       await failWork(item, error);
-      if (item.work_type === "acquire_filing_source") await refreshSourceAcquisitionProgress(item.job_id);
+      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source") await refreshPipelineProgress(item.job_id);
     }
   })().catch((error: unknown) => console.error(JSON.stringify({ event: "worker.poll_failed", message: error instanceof Error ? error.message : "Unknown poll failure." }))).finally(() => { polling = false; });
 }, 500);

@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import {
   assessReadiness,
@@ -105,6 +106,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     const [filings, jobs] = await Promise.all([
       sql`SELECT filings.id, accession_number, form_type, filing_date, report_date, primary_document, is_supported, filing_status,
         (SELECT status FROM filing_documents WHERE filing_documents.filing_id = filings.id ORDER BY id DESC LIMIT 1) AS source_status
+        , (SELECT status FROM normalized_documents JOIN filing_documents ON filing_documents.id = normalized_documents.document_id WHERE filing_documents.filing_id = filings.id ORDER BY normalized_documents.id DESC LIMIT 1) AS parse_status
         FROM filings WHERE company_id = ${id.data} ORDER BY filing_date DESC`,
       sql`SELECT id, status, progress, last_error, created_at, updated_at FROM jobs WHERE company_id = ${id.data} ORDER BY id DESC LIMIT 10`,
     ]);
@@ -136,6 +138,64 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       VALUES (${jobs[0].id}, 'acquire_filing_source', ${filing.company_id}, ${filing.id}, '{}'::jsonb)
     `;
     return reply.code(202).send({ jobId: jobs[0].id, message: "Primary SEC source acquisition queued." });
+  });
+
+  app.post("/api/v1/filings/:filingId/parse", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { filingId?: string }).filingId);
+    if (!id.success) return reply.code(400).send({ error: "Filing id must be a positive integer." });
+    const documents = await sql<{ id: number; filing_id: number; company_id: number }[]>`
+      SELECT filing_documents.id, filing_documents.filing_id, filings.company_id
+      FROM filing_documents JOIN filings ON filings.id = filing_documents.filing_id
+      WHERE filing_documents.filing_id = ${id.data} AND filing_documents.status = 'downloaded'
+      ORDER BY filing_documents.id DESC LIMIT 1
+    `;
+    const document = documents[0];
+    if (!document) return reply.code(409).send({ error: "A preserved primary source is required before parsing." });
+    const active = await sql<{ id: number }[]>`
+      SELECT id FROM work_items
+      WHERE document_id = ${document.id} AND work_type = 'parse_filing_source' AND status IN ('pending', 'running')
+      LIMIT 1
+    `;
+    if (active[0]) return reply.code(409).send({ error: "Parsing is already queued for this source." });
+    const jobs = await sql<{ id: number }[]>`
+      INSERT INTO jobs (job_type, company_id, status, progress)
+      VALUES ('filing_parsing', ${document.company_id}, 'running', ${sql.json({ parsing: { status: 'queued', queued: 1, complete: 0, failed: 0 } })})
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
+      VALUES (${jobs[0].id}, 'parse_filing_source', ${document.company_id}, ${document.filing_id}, ${document.id}, '{}'::jsonb)
+    `;
+    return reply.code(202).send({ jobId: jobs[0].id, message: "Deterministic filing parsing queued." });
+  });
+
+  app.get("/api/v1/filings/:filingId/parsed", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { filingId?: string }).filingId);
+    if (!id.success) return reply.code(400).send({ error: "Filing id must be a positive integer." });
+    const documents = await sql<{ document_id: number; normalized_document_id: number; normalized_text_path: string; text_hash: string; warnings: string[]; form_type: string; accession_number: string }[]>`
+      SELECT filing_documents.id AS document_id, normalized_documents.id AS normalized_document_id,
+        normalized_documents.normalized_text_path, normalized_documents.text_hash, normalized_documents.warnings,
+        filings.form_type, filings.accession_number
+      FROM normalized_documents
+      JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
+      JOIN filings ON filings.id = filing_documents.filing_id
+      WHERE filings.id = ${id.data} AND normalized_documents.status = 'parsed'
+      ORDER BY normalized_documents.id DESC LIMIT 1
+    `;
+    const document = documents[0];
+    if (!document) return reply.code(409).send({ error: "A parsed filing is not available yet." });
+    try {
+      const text = await readFile(document.normalized_text_path, "utf8");
+      const sections = await sql`
+        SELECT filing_sections.id, section_type, section_label, confidence_status, source_spans.start_offset, source_spans.end_offset
+        FROM filing_sections JOIN source_spans ON source_spans.id = filing_sections.source_span_id
+        WHERE filing_sections.document_id = ${document.document_id}
+        ORDER BY source_spans.start_offset
+      `;
+      return { filing: { id: id.data, formType: document.form_type, accessionNumber: document.accession_number }, document: { id: document.document_id, normalizedDocumentId: document.normalized_document_id, textHash: document.text_hash, warnings: document.warnings }, sections, text };
+    } catch (error) {
+      return reply.code(500).send({ error: error instanceof Error ? `The parsed filing text could not be read: ${error.message}` : "The parsed filing text could not be read." });
+    }
   });
 
   app.get("/api/v1/jobs/:jobId", async (request, reply) => {
