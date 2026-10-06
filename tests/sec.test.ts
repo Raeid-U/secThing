@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { canonicalCik, isSupportedMvpForm, SecClient } from "@secthing/platform";
+import { canonicalCik, filingArchiveDirectoryUrl, isSupportedMvpForm, SecClient } from "@secthing/platform";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -18,7 +18,7 @@ async function clientFor(responses: Record<string, unknown>) {
       ? new Response("not found", { status: 404 })
       : new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   });
-  return { client: new SecClient({ dataDir, userAgent: "secThing tests@example.com", rateLimitPerSecond: 10, fetch: fetch as typeof globalThis.fetch }), fetch, requestedAt };
+  return { dataDir, client: new SecClient({ dataDir, userAgent: "secThing tests@example.com", rateLimitPerSecond: 10, fetch: fetch as typeof globalThis.fetch }), fetch, requestedAt };
 }
 
 describe("SEC identity and submissions client", () => {
@@ -79,5 +79,22 @@ describe("SEC identity and submissions client", () => {
       expect.objectContaining({ accessionNumber: "0001", reportDate: "2026-08-10", items: "2.02" }),
       expect.objectContaining({ accessionNumber: "0002", reportDate: undefined, primaryDocument: "primary.xml", items: undefined }),
     ]);
+  });
+
+  it("acquires the SEC-indexed primary filing and preserves immutable source metadata", async () => {
+    const cik = 1286613;
+    const accessionNumber = "0001286613-25-000001";
+    const directory = filingArchiveDirectoryUrl(cik, accessionNumber);
+    const { dataDir } = await clientFor({});
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const key = String(url);
+      if (key.endsWith("index.json")) return new Response(JSON.stringify({ directory: { item: [{ name: "annual-report.htm", type: "10-K" }] } }), { status: 200, headers: { "content-type": "application/json" } });
+      if (key.endsWith("annual-report.htm")) return new Response("<html><body>Annual report</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+      return new Response("not found", { status: 404 });
+    });
+    const directClient = new SecClient({ dataDir, userAgent: "secThing tests@example.com", rateLimitPerSecond: 10, fetch: fetch as typeof globalThis.fetch });
+    const acquired = await directClient.acquirePrimaryFiling({ cik, accessionNumber, formType: "10-K", primaryDocument: "annual-report.htm" });
+    expect(acquired).toMatchObject({ documentName: "annual-report.htm", documentType: "primary_filing", url: `${directory}/annual-report.htm`, contentType: "text/html", byteSize: 39 });
+    await expect((await import("node:fs/promises")).readFile(acquired.bodyPath, "utf8")).resolves.toBe("<html><body>Annual report</body></html>");
   });
 });

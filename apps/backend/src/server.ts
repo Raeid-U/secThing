@@ -103,10 +103,39 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     `;
     if (!companies[0]) return reply.code(404).send({ error: "Company not found." });
     const [filings, jobs] = await Promise.all([
-      sql`SELECT id, accession_number, form_type, filing_date, report_date, primary_document, is_supported, filing_status FROM filings WHERE company_id = ${id.data} ORDER BY filing_date DESC`,
+      sql`SELECT filings.id, accession_number, form_type, filing_date, report_date, primary_document, is_supported, filing_status,
+        (SELECT status FROM filing_documents WHERE filing_documents.filing_id = filings.id ORDER BY id DESC LIMIT 1) AS source_status
+        FROM filings WHERE company_id = ${id.data} ORDER BY filing_date DESC`,
       sql`SELECT id, status, progress, last_error, created_at, updated_at FROM jobs WHERE company_id = ${id.data} ORDER BY id DESC LIMIT 10`,
     ]);
     return { company: companies[0], filings, jobs };
+  });
+
+  app.post("/api/v1/filings/:filingId/source/acquire", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { filingId?: string }).filingId);
+    if (!id.success) return reply.code(400).send({ error: "Filing id must be a positive integer." });
+    const filings = await sql<{ id: number; company_id: number; is_supported: boolean }[]>`
+      SELECT id, company_id, is_supported FROM filings WHERE id = ${id.data}
+    `;
+    const filing = filings[0];
+    if (!filing) return reply.code(404).send({ error: "Filing not found." });
+    if (!filing.is_supported) return reply.code(409).send({ error: "Source acquisition is currently limited to supported MVP filing forms." });
+    const active = await sql<{ id: number }[]>`
+      SELECT id FROM work_items
+      WHERE filing_id = ${filing.id} AND work_type = 'acquire_filing_source' AND status IN ('pending', 'running')
+      LIMIT 1
+    `;
+    if (active[0]) return reply.code(409).send({ error: "Source acquisition is already queued for this filing." });
+    const jobs = await sql<{ id: number }[]>`
+      INSERT INTO jobs (job_type, company_id, status, progress)
+      VALUES ('filing_source_acquisition', ${filing.company_id}, 'running', ${sql.json({ sourceAcquisition: { status: 'queued', queued: 1, complete: 0, failed: 0 } })})
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO work_items (job_id, work_type, company_id, filing_id, input)
+      VALUES (${jobs[0].id}, 'acquire_filing_source', ${filing.company_id}, ${filing.id}, '{}'::jsonb)
+    `;
+    return reply.code(202).send({ jobId: jobs[0].id, message: "Primary SEC source acquisition queued." });
   });
 
   app.get("/api/v1/jobs/:jobId", async (request, reply) => {

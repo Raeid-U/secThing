@@ -3,10 +3,10 @@
 import { FormEvent, useEffect, useState } from "react";
 
 type Company = { id: number; cik: number; legal_name: string; tickers: string[]; ingestion_status: string | null; earliest_requested_filing_date: string | null };
-type Filing = { id: number; accession_number: string; form_type: string; filing_date: string; report_date: string | null; is_supported: boolean; filing_status: string };
+type Filing = { id: number; accession_number: string; form_type: string; filing_date: string; report_date: string | null; is_supported: boolean; filing_status: string; source_status: string | null };
 type Address = { street1?: string; street2?: string; city?: string; stateOrCountryDescription?: string; stateOrCountry?: string; zipCode?: string };
 type CompanyDetail = { company: { id: number; cik: number; legal_name: string; exchange: string | null; sic: string | null; sic_description: string | null; entity_type: string | null; fiscal_year_end: string | null; state_of_incorporation_description: string | null; state_of_incorporation: string | null; business_address: Address | null; earliest_requested_filing_date: string | null }; filings: Filing[] };
-type Job = { job: { id: number; company_id: number | null; status: string; progress: { filings?: { discovered: number; total: number }; identity?: string; metadata?: string }; last_error: string | null } };
+type Job = { job: { id: number; company_id: number | null; status: string; progress: { filings?: { discovered: number; total: number }; identity?: string; metadata?: string; sourceAcquisition?: { queued: number; complete: number; failed: number } }; last_error: string | null } };
 
 function defaultStartDate() {
   const date = new Date();
@@ -41,6 +41,18 @@ export function CompanyWorkbench() {
     setSelected((await response.json()) as CompanyDetail);
   };
 
+  const acquireSource = async (filing: Filing) => {
+    try {
+      const response = await fetch(`/api/v1/filings/${filing.id}/source/acquire`, { method: "POST" });
+      const result = (await response.json()) as { jobId?: number; error?: string; message?: string };
+      if (!response.ok) throw new Error(result.error ?? "Source acquisition could not be queued.");
+      setNotice(result.message ?? "Primary SEC source acquisition queued.");
+      if (result.jobId) void pollJob(result.jobId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Source acquisition could not be queued.");
+    }
+  };
+
   const pollJob = async (jobId: number) => {
     for (let attempt = 0; attempt < 90; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -48,11 +60,12 @@ export function CompanyWorkbench() {
       if (!response.ok) continue;
       const result = (await response.json()) as Job;
       const filings = result.job.progress.filings;
-      setNotice(`Processing: identity ${result.job.progress.identity ?? "queued"}; metadata ${result.job.progress.metadata ?? "queued"}; filings ${filings?.total ?? 0} stored.`);
+      const sources = result.job.progress.sourceAcquisition;
+      setNotice(`Processing: identity ${result.job.progress.identity ?? "queued"}; metadata ${result.job.progress.metadata ?? "queued"}; ${sources ? `sources ${sources.complete} acquired, ${sources.queued} queued` : `filings ${filings?.total ?? 0} stored`}.`);
       if (result.job.status === "complete" && result.job.company_id) {
         await loadCompanies();
         await openCompany(result.job.company_id);
-        setNotice(`Metadata complete. ${filings?.total ?? 0} filings are stored locally; source acquisition and parsing have not started.`);
+        setNotice(`Evidence intake complete. ${filings?.total ?? 0} filings are indexed and ${sources?.complete ?? 0} primary SEC sources are preserved locally.`);
         return;
       }
       if (result.job.status === "partial") {
@@ -132,7 +145,7 @@ export function CompanyWorkbench() {
               <div><dt>Business address</dt><dd>{formatAddress(selected.company.business_address) ?? "Not reported"}</dd></div>
             </dl>
             <ol className="filing-list">
-              {selected.filings.map((filing) => <li key={filing.id}><span>{filing.form_type}</span><time>{filing.filing_date}</time><small>{filing.is_supported ? "MVP form" : "Metadata only"}</small></li>)}
+              {selected.filings.map((filing) => <li key={filing.id}><span>{filing.form_type}</span><time>{filing.filing_date}</time><small>{filing.is_supported ? filing.source_status === "downloaded" ? "Source preserved" : <button className="source-action" type="button" onClick={() => void acquireSource(filing)}>{filing.source_status === "failed" ? "Retry source" : "Acquire source"}</button> : "Metadata only"}</small></li>)}
             </ol>
           </>}
         </div>

@@ -23,4 +23,19 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "local" })).toThrow();
     expect(loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "local", AI_CHAT_PROVIDER: "ollama", AI_CHAT_BASE_URL: "http://ollama:11434" })).toMatchObject({ aiMode: "local", aiChatProvider: "ollama" });
   });
+
+  it("treats blank optional AI variables injected by Compose as unset", () => {
+    expect(loadConfig({
+      DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing",
+      AI_CHAT_PROVIDER: "",
+      AI_CHAT_BASE_URL: "",
+      AI_CHAT_API_KEY: "",
+      AI_CHAT_MODEL: "",
+      AI_EMBEDDING_PROVIDER: "",
+      AI_EMBEDDING_BASE_URL: "",
+      AI_EMBEDDING_API_KEY: "",
+      AI_EMBEDDING_MODEL: "",
+      AI_EMBEDDING_DIMENSION: "",
+    })).toMatchObject({ aiMode: "disabled", aiChatModel: undefined, aiEmbeddingDimension: undefined });
+  });
 });

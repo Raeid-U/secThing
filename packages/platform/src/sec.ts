@@ -13,6 +13,17 @@ export type SecCachedResponse = {
   contentHash: string;
 };
 
+export type AcquiredFilingDocument = {
+  documentName: string;
+  documentType: "primary_filing";
+  url: string;
+  contentType: string | null;
+  bodyPath: string;
+  contentHash: string;
+  byteSize: number;
+  indexResponse: SecCachedResponse;
+};
+
 export type TickerMatch = { ticker: string; cik: number; title: string };
 
 export type SubmissionFiling = {
@@ -122,6 +133,27 @@ export function canonicalCik(cik: number): string {
   return String(cik).padStart(10, "0");
 }
 
+export function filingArchiveDirectoryUrl(cik: number, accessionNumber: string): string {
+  const accession = accessionNumber.replaceAll("-", "");
+  if (!/^\d+$/.test(accession)) throw new Error(`Invalid SEC accession number: ${accessionNumber}`);
+  return `${SEC_BASE_URL}/Archives/edgar/data/${cik}/${accession}`;
+}
+
+function safeDocumentName(value: string | undefined): string | undefined {
+  return value && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) ? value : undefined;
+}
+
+function contentExtension(url: string, contentType: string | null): string {
+  const pathname = new URL(url).pathname;
+  const name = pathname.slice(pathname.lastIndexOf("/") + 1);
+  const match = name.match(/(\.[A-Za-z0-9]{1,12})$/);
+  if (match) return match[1].toLowerCase();
+  if (contentType?.includes("html")) return ".html";
+  if (contentType?.includes("json")) return ".json";
+  if (contentType?.includes("plain")) return ".txt";
+  return ".bin";
+}
+
 export function isSupportedMvpForm(form: string): boolean {
   return ["10-K", "10-Q", "8-K", "10-K/A", "10-Q/A", "8-K/A"].includes(form);
 }
@@ -191,7 +223,45 @@ export class SecClient {
     };
   }
 
+  async acquirePrimaryFiling(input: { cik: number; accessionNumber: string; formType: string; primaryDocument?: string }): Promise<AcquiredFilingDocument> {
+    const directoryUrl = filingArchiveDirectoryUrl(input.cik, input.accessionNumber);
+    const index = await this.fetchJson(`${directoryUrl}/index.json`);
+    const root = index.body as Record<string, unknown>;
+    const directory = root.directory;
+    const items: unknown[] = directory && typeof directory === "object" && Array.isArray((directory as Record<string, unknown>).item)
+      ? (directory as Record<string, unknown>).item as unknown[]
+      : [];
+    const documents = items.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const item = entry as Record<string, unknown>;
+      const name = safeDocumentName(asString(item.name));
+      return name ? [{ name, type: asString(item.type) }] : [];
+    });
+    const preferred = safeDocumentName(input.primaryDocument);
+    const documentName = preferred && documents.some((document) => document.name === preferred)
+      ? preferred
+      : documents.find((document) => document.type === input.formType)?.name;
+    if (!documentName) throw new Error(`SEC filing index did not identify a primary ${input.formType} document for ${input.accessionNumber}.`);
+    const url = `${directoryUrl}/${encodeURIComponent(documentName)}`;
+    const document = await this.fetchText(url, join("sec", "filings", String(input.cik), input.accessionNumber.replaceAll("-", "")), "text/html, text/plain, application/xhtml+xml, */*");
+    return {
+      documentName,
+      documentType: "primary_filing",
+      url,
+      contentType: document.cache.contentType,
+      bodyPath: document.cache.bodyPath,
+      contentHash: document.cache.contentHash,
+      byteSize: Buffer.byteLength(document.text),
+      indexResponse: index.cache,
+    };
+  }
+
   private async fetchJson(url: string): Promise<{ body: unknown; cache: SecCachedResponse }> {
+    const response = await this.fetchText(url, join("sec", "api"), "application/json");
+    return { body: JSON.parse(response.text) as unknown, cache: response.cache };
+  }
+
+  private async fetchText(url: string, relativeDirectory: string, accept: string): Promise<{ text: string; cache: SecCachedResponse }> {
     const userAgent = requireUserAgent(this.options.userAgent);
     const request = this.options.fetch ?? fetch;
     const attempts = 3;
@@ -199,7 +269,7 @@ export class SecClient {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       await this.waitForRateLimit();
       try {
-        const response = await request(url, { headers: { "User-Agent": userAgent, Accept: "application/json" } });
+        const response = await request(url, { headers: { "User-Agent": userAgent, Accept: accept } });
         const text = await response.text();
         if (!response.ok) {
           if ([403, 429, 500, 502, 503, 504].includes(response.status) && attempt < attempts - 1) {
@@ -209,12 +279,12 @@ export class SecClient {
           throw new Error(`SEC request failed (${response.status}) for ${url}.`);
         }
         const contentHash = createHash("sha256").update(text).digest("hex");
-        const directory = join(this.options.dataDir, "sec", "api");
+        const directory = join(this.options.dataDir, relativeDirectory);
         await mkdir(directory, { recursive: true });
-        const bodyPath = join(directory, `${contentHash}.json`);
+        const bodyPath = join(directory, `${contentHash}${contentExtension(url, response.headers.get("content-type"))}`);
         await writeFile(bodyPath, text, { flag: "w" });
         return {
-          body: JSON.parse(text) as unknown,
+          text,
           cache: { url, status: response.status, contentType: response.headers.get("content-type"), bodyPath, contentHash },
         };
       } catch (error) {

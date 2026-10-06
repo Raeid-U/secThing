@@ -14,8 +14,9 @@ const sql = connectDatabase(config.databaseUrl);
 const workerId = `worker-${randomUUID()}`;
 const sec = new SecClient({ dataDir: config.dataDir, userAgent: config.secUserAgent, rateLimitPerSecond: config.secRateLimitPerSecond });
 
-type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata"; company_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
+type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata" | "acquire_filing_source"; company_id: number | null; filing_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
 type Company = { id: number; cik: number };
+type SourceFiling = { id: number; cik: number; accession_number: string; form_type: string; primary_document: string | null };
 
 async function storeResponse(response: { url: string; status: number; contentType: string | null; bodyPath: string; contentHash: string }) {
   await sql`
@@ -36,7 +37,7 @@ async function claimWork(): Promise<WorkItem | undefined> {
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    RETURNING id, job_id, work_type, company_id, attempt_count, input
+    RETURNING id, job_id, work_type, company_id, filing_id, attempt_count, input
   `;
   return claimed[0];
 }
@@ -119,7 +120,81 @@ async function fetchMetadata(item: WorkItem): Promise<void> {
   if (!company) throw new Error("Company no longer exists.");
   const submission = await sec.fetchCompanySubmission(company.cik);
   const counts = await persistSubmission(company, submission, startDate);
-  await sql`UPDATE jobs SET status = 'complete', progress = ${sql.json({ identity: "complete", metadata: "complete", filings: { discovered: counts.discovered, total: counts.total }, sourceAcquisition: "not_started", parsing: "not_started", chunking: "not_started" })}, updated_at = now() WHERE id = ${item.job_id}`;
+  const queued = await queueSourceAcquisition(item.job_id, company.id);
+  await sql`
+    UPDATE jobs
+    SET status = ${queued > 0 ? "running" : "complete"},
+        progress = ${sql.json({ identity: "complete", metadata: "complete", filings: { discovered: counts.discovered, total: counts.total }, sourceAcquisition: { status: queued > 0 ? "queued" : "not_applicable", queued, complete: 0, failed: 0 }, parsing: "not_started", chunking: "not_started" })},
+        updated_at = now()
+    WHERE id = ${item.job_id}
+  `;
+}
+
+async function queueSourceAcquisition(jobId: number, companyId: number): Promise<number> {
+  const queued = await sql<{ id: number }[]>`
+    INSERT INTO work_items (job_id, work_type, company_id, filing_id, input)
+    SELECT ${jobId}, 'acquire_filing_source', filings.company_id, filings.id, '{}'::jsonb
+    FROM filings
+    WHERE filings.company_id = ${companyId}
+      AND filings.is_supported = true
+      AND NOT EXISTS (
+        SELECT 1 FROM filing_documents
+        WHERE filing_documents.filing_id = filings.id
+          AND filing_documents.status = 'downloaded'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM work_items
+        WHERE work_items.job_id = ${jobId}
+          AND work_items.work_type = 'acquire_filing_source'
+          AND work_items.filing_id = filings.id
+      )
+    RETURNING id
+  `;
+  return queued.length;
+}
+
+async function acquireFilingSource(item: WorkItem): Promise<void> {
+  if (!item.filing_id) throw new Error("Source-acquisition work item is missing a filing.");
+  const filings = await sql<SourceFiling[]>`
+    SELECT id, cik, accession_number, form_type, primary_document
+    FROM filings WHERE id = ${item.filing_id}
+  `;
+  const filing = filings[0];
+  if (!filing) throw new Error("Filing no longer exists.");
+  const document = await sec.acquirePrimaryFiling({
+    cik: filing.cik,
+    accessionNumber: filing.accession_number,
+    formType: filing.form_type,
+    primaryDocument: filing.primary_document ?? undefined,
+  });
+  await storeResponse(document.indexResponse);
+  await sql`
+    INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size, status, fetched_at)
+    VALUES (${filing.id}, ${document.documentName}, ${document.documentType}, ${document.url}, ${document.bodyPath}, ${document.contentType}, ${document.contentHash}, ${document.byteSize}, 'downloaded', now())
+    ON CONFLICT (filing_id, document_name) DO UPDATE SET
+      document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
+      content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
+      status = 'downloaded', last_error = NULL, fetched_at = now(), updated_at = now()
+  `;
+  await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
+}
+
+async function refreshSourceAcquisitionProgress(jobId: number): Promise<void> {
+  const rows = await sql<{ queued: number; complete: number; failed: number }[]>`
+    SELECT count(*) FILTER (WHERE status IN ('pending', 'running'))::integer AS queued,
+      count(*) FILTER (WHERE status = 'complete')::integer AS complete,
+      count(*) FILTER (WHERE status = 'failed')::integer AS failed
+    FROM work_items WHERE job_id = ${jobId} AND work_type = 'acquire_filing_source'
+  `;
+  const progress = rows[0];
+  const status = progress.failed > 0 ? 'partial' : progress.queued > 0 ? 'running' : 'complete';
+  await sql`
+    UPDATE jobs
+    SET status = ${status},
+        progress = progress || ${sql.json({ sourceAcquisition: { status: status === 'complete' ? 'complete' : status, queued: progress.queued, complete: progress.complete, failed: progress.failed } })},
+        updated_at = now()
+    WHERE id = ${jobId}
+  `;
 }
 
 async function completeWork(item: WorkItem): Promise<void> {
@@ -132,7 +207,7 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
   await sql`
     UPDATE work_items
     SET status = ${retry ? 'pending' : 'failed'}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
-        error_code = 'sec_ingestion_failed', error_message = ${message}, updated_at = now()
+        error_code = ${item.work_type === 'acquire_filing_source' ? 'source_acquisition_failed' : 'sec_ingestion_failed'}, error_message = ${message}, updated_at = now()
     WHERE id = ${item.id}
   `;
   await sql`UPDATE jobs SET status = ${retry ? 'running' : 'partial'}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
@@ -150,12 +225,15 @@ const idleLoop = setInterval(() => {
     if (!item) return;
     try {
       if (item.work_type === "resolve_company") await resolveCompany(item);
-      else await fetchMetadata(item);
+      else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
+      else await acquireFilingSource(item);
       await completeWork(item);
+      if (item.work_type === "acquire_filing_source") await refreshSourceAcquisitionProgress(item.job_id);
       console.info(JSON.stringify({ event: "worker.work_complete", workItemId: item.id, jobId: item.job_id, workType: item.work_type }));
     } catch (error) {
       console.error(JSON.stringify({ event: "worker.work_exception", workItemId: item.id, jobId: item.job_id, workType: item.work_type, stack: error instanceof Error ? error.stack : undefined }));
       await failWork(item, error);
+      if (item.work_type === "acquire_filing_source") await refreshSourceAcquisitionProgress(item.job_id);
     }
   })().catch((error: unknown) => console.error(JSON.stringify({ event: "worker.poll_failed", message: error instanceof Error ? error.message : "Unknown poll failure." }))).finally(() => { polling = false; });
 }, 500);

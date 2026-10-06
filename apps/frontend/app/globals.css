@@ -196,6 +196,8 @@ h2 {
 .filing-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
 .filing-list li { display: grid; grid-template-columns: 5rem 1fr auto; gap: 1rem; padding: .7rem 0; border-bottom: 1px solid var(--rule); font-size: .88rem; }
 .filing-list time, .filing-list small { color: var(--muted); }
+.source-action { border: 0; border-bottom: 1px solid currentColor; padding: 0; color: var(--blue); background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.source-action:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
 
 footer {
   display: flex;
