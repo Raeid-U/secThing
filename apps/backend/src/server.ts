@@ -106,7 +106,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     const [filings, jobs] = await Promise.all([
       sql`SELECT filings.id, accession_number, form_type, filing_date, report_date, primary_document, is_supported, filing_status,
         (SELECT status FROM filing_documents WHERE filing_documents.filing_id = filings.id ORDER BY id DESC LIMIT 1) AS source_status
-        , (SELECT status FROM normalized_documents JOIN filing_documents ON filing_documents.id = normalized_documents.document_id WHERE filing_documents.filing_id = filings.id ORDER BY normalized_documents.id DESC LIMIT 1) AS parse_status
+        , (SELECT normalized_documents.status FROM normalized_documents JOIN filing_documents ON filing_documents.id = normalized_documents.document_id WHERE filing_documents.filing_id = filings.id ORDER BY normalized_documents.id DESC LIMIT 1) AS parse_status
         FROM filings WHERE company_id = ${id.data} ORDER BY filing_date DESC`,
       sql`SELECT id, status, progress, last_error, created_at, updated_at FROM jobs WHERE company_id = ${id.data} ORDER BY id DESC LIMIT 10`,
     ]);
