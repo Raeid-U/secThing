@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { connectDatabase, assessWorkerReadiness, FilingParser, filingParserVersion, isSupportedMvpForm, loadConfig, SecClient, type CompanySubmission } from "@secthing/platform";
+import { ChunkingAndIndexing, chunkingProfileVersion, connectDatabase, assessWorkerReadiness, FilingParser, filingParserVersion, isSupportedMvpForm, loadConfig, SecClient, type CompanySubmission } from "@secthing/platform";
 import type { Sql } from "postgres";
 
 const config = loadConfig();
@@ -14,11 +14,13 @@ const sql = connectDatabase(config.databaseUrl);
 const workerId = `worker-${randomUUID()}`;
 const sec = new SecClient({ dataDir: config.dataDir, userAgent: config.secUserAgent, rateLimitPerSecond: config.secRateLimitPerSecond });
 const parser = new FilingParser();
+const chunking = new ChunkingAndIndexing();
 
-type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata" | "acquire_filing_source" | "parse_filing_source"; company_id: number | null; filing_id: number | null; document_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
+type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata" | "acquire_filing_source" | "parse_filing_source" | "chunk_document"; company_id: number | null; filing_id: number | null; document_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
 type Company = { id: number; cik: number };
 type SourceFiling = { id: number; cik: number; accession_number: string; form_type: string; primary_document: string | null };
 type ParseDocument = { id: number; filing_id: number; form_type: string; local_path: string; content_type: string | null; content_hash: string };
+type ChunkDocument = { document_id: number; filing_id: number; company_id: number; normalized_document_id: number; normalized_text_path: string; text_hash: string };
 
 async function storeResponse(response: { url: string; status: number; contentType: string | null; bodyPath: string; contentHash: string }) {
   await sql`
@@ -252,10 +254,82 @@ async function parseFilingSource(item: WorkItem): Promise<void> {
     }
   });
   await sql`UPDATE filings SET filing_status = 'parsed', updated_at = now() WHERE id = ${document.filing_id}`;
+  await queueChunking(item.job_id, item.company_id, document.filing_id, document.id);
+}
+
+async function queueChunking(jobId: number, companyId: number | null, filingId: number, documentId: number): Promise<void> {
+  await sql`
+    INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
+    SELECT ${jobId}, 'chunk_document', ${companyId}, ${filingId}, ${documentId}, '{}'::jsonb
+    WHERE EXISTS (
+      SELECT 1 FROM normalized_documents
+      WHERE document_id = ${documentId} AND status = 'parsed'
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM chunks
+        JOIN normalized_documents ON normalized_documents.id = chunks.normalized_document_id
+        WHERE normalized_documents.document_id = ${documentId}
+          AND chunks.chunk_profile_version = ${chunkingProfileVersion}
+          AND chunks.normalized_text_hash = normalized_documents.text_hash
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM work_items
+        WHERE job_id = ${jobId} AND work_type = 'chunk_document' AND document_id = ${documentId}
+          AND status IN ('pending', 'running')
+      )
+  `;
+}
+
+async function chunkDocument(item: WorkItem): Promise<void> {
+  if (!item.document_id || !item.filing_id || !item.company_id) throw new Error("Chunking work item is missing its company, filing, or document.");
+  const documents = await sql<ChunkDocument[]>`
+    SELECT filing_documents.id AS document_id, filing_documents.filing_id, filings.company_id,
+      normalized_documents.id AS normalized_document_id, normalized_documents.normalized_text_path, normalized_documents.text_hash
+    FROM normalized_documents
+    JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
+    JOIN filings ON filings.id = filing_documents.filing_id
+    WHERE filing_documents.id = ${item.document_id} AND normalized_documents.status = 'parsed'
+    ORDER BY normalized_documents.id DESC LIMIT 1
+  `;
+  const document = documents[0];
+  if (!document) throw new Error("A parsed normalized document is required before chunking.");
+  const normalizedText = await (await import("node:fs/promises")).readFile(document.normalized_text_path, "utf8");
+  const sections = await sql<{ id: number; section_type: string; section_label: string; start_offset: number; end_offset: number }[]>`
+    SELECT filing_sections.id, filing_sections.section_type, filing_sections.section_label, source_spans.start_offset, source_spans.end_offset
+    FROM filing_sections JOIN source_spans ON source_spans.id = filing_sections.source_span_id
+    WHERE filing_sections.document_id = ${document.document_id}
+    ORDER BY source_spans.start_offset
+  `;
+  const chunks = chunking.process(normalizedText, sections.map((section) => ({
+    sectionId: section.id,
+    sectionType: section.section_type,
+    sectionLabel: section.section_label,
+    startOffset: section.start_offset,
+    endOffset: section.end_offset,
+  })));
+  if (chunks.length === 0) throw new Error("Chunking produced no searchable evidence.");
+  await sql.begin(async (transaction) => {
+    await transaction`DELETE FROM chunks WHERE normalized_document_id = ${document.normalized_document_id}`;
+    await transaction`DELETE FROM source_spans WHERE normalized_document_id = ${document.normalized_document_id} AND span_kind = 'chunk'`;
+    for (const chunk of chunks) {
+      const spans = await transaction<{ id: number }[]>`
+        INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind)
+        VALUES (${document.normalized_document_id}, ${chunk.startOffset}, ${chunk.endOffset}, ${chunk.hash}, 'chunk')
+        RETURNING id
+      `;
+      await transaction`
+        INSERT INTO chunks (company_id, filing_id, document_id, normalized_document_id, section_id, source_span_id,
+          start_offset, end_offset, chunk_text, chunk_hash, token_estimate, chunk_profile, chunk_profile_version, normalized_text_hash)
+        VALUES (${document.company_id}, ${document.filing_id}, ${document.document_id}, ${document.normalized_document_id}, ${chunk.sectionId}, ${spans[0].id},
+          ${chunk.startOffset}, ${chunk.endOffset}, ${chunk.text}, ${chunk.hash}, ${chunk.tokenEstimate}, ${chunk.profile}, ${chunkingProfileVersion}, ${document.text_hash})
+      `;
+    }
+  });
+  await sql`UPDATE filings SET filing_status = 'chunked', updated_at = now() WHERE id = ${document.filing_id}`;
 }
 
 async function refreshPipelineProgress(jobId: number): Promise<void> {
-  const rows = await sql<{ source_queued: number; source_complete: number; source_failed: number; parse_queued: number; parse_complete: number; parse_failed: number }[]>`
+  const rows = await sql<{ source_queued: number; source_complete: number; source_failed: number; parse_queued: number; parse_complete: number; parse_failed: number; chunk_queued: number; chunk_complete: number; chunk_failed: number }[]>`
     SELECT
       count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status IN ('pending', 'running'))::integer AS source_queued,
       count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status = 'complete')::integer AS source_complete,
@@ -263,11 +337,14 @@ async function refreshPipelineProgress(jobId: number): Promise<void> {
       count(*) FILTER (WHERE work_type = 'parse_filing_source' AND status IN ('pending', 'running'))::integer AS parse_queued,
       count(*) FILTER (WHERE work_type = 'parse_filing_source' AND status = 'complete')::integer AS parse_complete,
       count(*) FILTER (WHERE work_type = 'parse_filing_source' AND status = 'failed')::integer AS parse_failed
+      , count(*) FILTER (WHERE work_type = 'chunk_document' AND status IN ('pending', 'running'))::integer AS chunk_queued
+      , count(*) FILTER (WHERE work_type = 'chunk_document' AND status = 'complete')::integer AS chunk_complete
+      , count(*) FILTER (WHERE work_type = 'chunk_document' AND status = 'failed')::integer AS chunk_failed
     FROM work_items WHERE job_id = ${jobId}
   `;
   const progress = rows[0];
-  const failed = progress.source_failed + progress.parse_failed;
-  const queued = progress.source_queued + progress.parse_queued;
+  const failed = progress.source_failed + progress.parse_failed + progress.chunk_failed;
+  const queued = progress.source_queued + progress.parse_queued + progress.chunk_queued;
   const status = failed > 0 ? 'partial' : queued > 0 ? 'running' : 'complete';
   await sql`
     UPDATE jobs
@@ -275,6 +352,7 @@ async function refreshPipelineProgress(jobId: number): Promise<void> {
         progress = progress || ${sql.json({
           sourceAcquisition: { status: progress.source_failed > 0 ? 'partial' : progress.source_queued > 0 ? 'running' : 'complete', queued: progress.source_queued, complete: progress.source_complete, failed: progress.source_failed },
           parsing: { status: progress.parse_failed > 0 ? 'partial' : progress.parse_queued > 0 ? 'running' : 'complete', queued: progress.parse_queued, complete: progress.parse_complete, failed: progress.parse_failed },
+          chunking: { status: progress.chunk_failed > 0 ? 'partial' : progress.chunk_queued > 0 ? 'running' : 'complete', queued: progress.chunk_queued, complete: progress.chunk_complete, failed: progress.chunk_failed },
         })},
         updated_at = now()
     WHERE id = ${jobId}
@@ -291,7 +369,7 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
   await sql`
     UPDATE work_items
     SET status = ${retry ? 'pending' : 'failed'}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
-        error_code = ${item.work_type === 'acquire_filing_source' ? 'source_acquisition_failed' : item.work_type === 'parse_filing_source' ? 'filing_parse_failed' : 'sec_ingestion_failed'}, error_message = ${message}, updated_at = now()
+        error_code = ${item.work_type === 'acquire_filing_source' ? 'source_acquisition_failed' : item.work_type === 'parse_filing_source' ? 'filing_parse_failed' : item.work_type === 'chunk_document' ? 'filing_chunking_failed' : 'sec_ingestion_failed'}, error_message = ${message}, updated_at = now()
     WHERE id = ${item.id}
   `;
   await sql`UPDATE jobs SET status = ${retry ? 'running' : 'partial'}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
@@ -311,14 +389,15 @@ const idleLoop = setInterval(() => {
       if (item.work_type === "resolve_company") await resolveCompany(item);
       else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
       else if (item.work_type === "acquire_filing_source") await acquireFilingSource(item);
-      else await parseFilingSource(item);
+      else if (item.work_type === "parse_filing_source") await parseFilingSource(item);
+      else await chunkDocument(item);
       await completeWork(item);
-      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source") await refreshPipelineProgress(item.job_id);
+      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source" || item.work_type === "chunk_document") await refreshPipelineProgress(item.job_id);
       console.info(JSON.stringify({ event: "worker.work_complete", workItemId: item.id, jobId: item.job_id, workType: item.work_type }));
     } catch (error) {
       console.error(JSON.stringify({ event: "worker.work_exception", workItemId: item.id, jobId: item.job_id, workType: item.work_type, stack: error instanceof Error ? error.stack : undefined }));
       await failWork(item, error);
-      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source") await refreshPipelineProgress(item.job_id);
+      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source" || item.work_type === "chunk_document") await refreshPipelineProgress(item.job_id);
     }
   })().catch((error: unknown) => console.error(JSON.stringify({ event: "worker.poll_failed", message: error instanceof Error ? error.message : "Unknown poll failure." }))).finally(() => { polling = false; });
 }, 500);

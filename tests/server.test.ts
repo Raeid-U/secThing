@@ -21,7 +21,7 @@ describe("backend health", () => {
   it("advertises current capability state", async () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/system/capabilities" });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ phase: 2, companyIngestion: false, ragChat: false });
+    expect(response.json()).toMatchObject({ phase: 6, companyIngestion: false, filingSearch: true, ragChat: false });
   });
 
   it("reports disabled AI without contacting a runtime", async () => {

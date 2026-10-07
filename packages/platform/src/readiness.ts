@@ -49,10 +49,10 @@ export async function assessWorkerReadiness(config: PlatformConfig): Promise<Rea
 export function capabilities(config: PlatformConfig) {
   return {
     companyIngestion: Boolean(config.secUserAgent),
-    filingSearch: false,
+    filingSearch: true,
     ragChat: false,
     aiMode: config.aiMode,
     localOnly: config.localOnly,
-    phase: 2,
+    phase: 6,
   };
 }

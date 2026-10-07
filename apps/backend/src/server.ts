@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   assessReadiness,
   capabilities,
+  chunkingProfileVersion,
   connectDatabase,
   inspectAiRuntime,
   loadConfig,
@@ -113,6 +114,48 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     return { company: companies[0], filings, jobs };
   });
 
+  app.get("/api/v1/companies/:companyId/search", async (request, reply) => {
+    const params = z.object({ companyId: z.coerce.number().int().positive() }).safeParse(request.params);
+    const query = z.object({
+      q: z.string().trim().min(2).max(500),
+      formType: z.string().trim().min(1).max(32).optional(),
+      sectionType: z.string().trim().min(1).max(64).optional(),
+      filedAfter: z.string().date().optional(),
+      filedBefore: z.string().date().optional(),
+      limit: z.coerce.number().int().min(1).max(50).default(20),
+    }).safeParse(request.query);
+    if (!params.success) return reply.code(400).send({ error: "Company id must be a positive integer." });
+    if (!query.success) return reply.code(400).send({ error: "A search query of at least two characters and valid filters are required.", details: query.error.flatten() });
+    if (query.data.filedAfter && query.data.filedBefore && query.data.filedAfter > query.data.filedBefore) {
+      return reply.code(400).send({ error: "filedAfter cannot be later than filedBefore." });
+    }
+    const company = await sql<{ id: number }[]>`SELECT id FROM companies WHERE id = ${params.data.companyId}`;
+    if (!company[0]) return reply.code(404).send({ error: "Company not found." });
+    const results = await sql`
+      SELECT chunks.id AS chunk_id, chunks.filing_id, chunks.document_id, chunks.section_id, chunks.source_span_id,
+        chunks.start_offset, chunks.end_offset, chunks.token_estimate, chunks.chunk_profile,
+        filings.form_type, filings.filing_date, filings.report_date, filings.accession_number,
+        filing_documents.document_name, filing_sections.section_type, filing_sections.section_label,
+        ts_rank_cd(chunks.search_vector, websearch_to_tsquery('english', ${query.data.q})) AS rank,
+        ts_headline('english', chunks.chunk_text, websearch_to_tsquery('english', ${query.data.q}),
+          'StartSel=<mark>, StopSel=</mark>, MaxWords=42, MinWords=18, MaxFragments=2, FragmentDelimiter= … ') AS snippet
+      FROM chunks
+      JOIN filings ON filings.id = chunks.filing_id
+      JOIN filing_documents ON filing_documents.id = chunks.document_id
+      JOIN filing_sections ON filing_sections.id = chunks.section_id
+      WHERE chunks.company_id = ${params.data.companyId}
+        AND chunks.chunk_profile_version = ${chunkingProfileVersion}
+        AND chunks.search_vector @@ websearch_to_tsquery('english', ${query.data.q})
+        AND (${query.data.formType ?? null}::text IS NULL OR filings.form_type = ${query.data.formType ?? null})
+        AND (${query.data.sectionType ?? null}::text IS NULL OR filing_sections.section_type = ${query.data.sectionType ?? null})
+        AND (${query.data.filedAfter ?? null}::date IS NULL OR filings.filing_date >= ${query.data.filedAfter ?? null}::date)
+        AND (${query.data.filedBefore ?? null}::date IS NULL OR filings.filing_date <= ${query.data.filedBefore ?? null}::date)
+      ORDER BY rank DESC, filings.filing_date DESC, chunks.id
+      LIMIT ${query.data.limit}
+    `;
+    return { query: query.data.q, mode: "full_text" as const, results };
+  });
+
   app.post("/api/v1/filings/:filingId/source/acquire", async (request, reply) => {
     const id = z.coerce.number().int().positive().safeParse((request.params as { filingId?: string }).filingId);
     if (!id.success) return reply.code(400).send({ error: "Filing id must be a positive integer." });
@@ -167,6 +210,45 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       VALUES (${jobs[0].id}, 'parse_filing_source', ${document.company_id}, ${document.filing_id}, ${document.id}, '{}'::jsonb)
     `;
     return reply.code(202).send({ jobId: jobs[0].id, message: "Deterministic filing parsing queued." });
+  });
+
+  app.post("/api/v1/filings/:filingId/chunk", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { filingId?: string }).filingId);
+    if (!id.success) return reply.code(400).send({ error: "Filing id must be a positive integer." });
+    const documents = await sql<{ document_id: number; company_id: number; normalized_document_id: number; text_hash: string }[]>`
+      SELECT filing_documents.id AS document_id, filings.company_id, normalized_documents.id AS normalized_document_id, normalized_documents.text_hash
+      FROM normalized_documents
+      JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
+      JOIN filings ON filings.id = filing_documents.filing_id
+      WHERE filings.id = ${id.data} AND normalized_documents.status = 'parsed'
+      ORDER BY normalized_documents.id DESC LIMIT 1
+    `;
+    const document = documents[0];
+    if (!document) return reply.code(409).send({ error: "A parsed filing is required before chunking." });
+    const active = await sql<{ id: number }[]>`
+      SELECT id FROM work_items
+      WHERE document_id = ${document.document_id} AND work_type = 'chunk_document' AND status IN ('pending', 'running')
+      LIMIT 1
+    `;
+    if (active[0]) return reply.code(409).send({ error: "Chunking is already queued for this filing." });
+    const existing = await sql<{ id: number }[]>`
+      SELECT id FROM chunks
+      WHERE normalized_document_id = ${document.normalized_document_id}
+        AND normalized_text_hash = ${document.text_hash}
+        AND chunk_profile_version = ${chunkingProfileVersion}
+      LIMIT 1
+    `;
+    if (existing[0]) return reply.code(409).send({ error: "This parsed filing is already indexed with the current chunking profile." });
+    const jobs = await sql<{ id: number }[]>`
+      INSERT INTO jobs (job_type, company_id, status, progress)
+      VALUES ('filing_chunking', ${document.company_id}, 'running', ${sql.json({ chunking: { status: 'queued', queued: 1, complete: 0, failed: 0 } })})
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
+      VALUES (${jobs[0].id}, 'chunk_document', ${document.company_id}, ${id.data}, ${document.document_id}, '{}'::jsonb)
+    `;
+    return reply.code(202).send({ jobId: jobs[0].id, message: "Search indexing queued for the parsed filing." });
   });
 
   app.get("/api/v1/filings/:filingId/parsed", async (request, reply) => {
