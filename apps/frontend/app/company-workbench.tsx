@@ -2,154 +2,29 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
-type Company = { id: number; cik: number; legal_name: string; tickers: string[]; ingestion_status: string | null; earliest_requested_filing_date: string | null };
-type Filing = { id: number; accession_number: string; form_type: string; filing_date: string; report_date: string | null; is_supported: boolean; filing_status: string; source_status: string | null };
-type Address = { street1?: string; street2?: string; city?: string; stateOrCountryDescription?: string; stateOrCountry?: string; zipCode?: string };
-type CompanyDetail = { company: { id: number; cik: number; legal_name: string; exchange: string | null; sic: string | null; sic_description: string | null; entity_type: string | null; fiscal_year_end: string | null; state_of_incorporation_description: string | null; state_of_incorporation: string | null; business_address: Address | null; earliest_requested_filing_date: string | null }; filings: Filing[] };
-type Job = { job: { id: number; company_id: number | null; status: string; progress: { filings?: { discovered: number; total: number }; identity?: string; metadata?: string; sourceAcquisition?: { queued: number; complete: number; failed: number } }; last_error: string | null } };
+type Company = { id: number; cik: number; legal_name: string; tickers: string[]; ingestion_status: string | null };
+type Filing = { id: number; accession_number: string; form_type: string; filing_date: string; report_date: string | null; is_supported: boolean; source_status: string | null; parse_status: string | null };
+type Detail = { company: { id: number; cik: number; legal_name: string; exchange: string | null; sic: string | null; sic_description: string | null; state_of_incorporation_description: string | null; business_address: Record<string, string> | null; earliest_requested_filing_date: string | null }; filings: Filing[] };
+type Job = { job: { company_id: number | null; status: string; progress: { sourceAcquisition?: { complete: number }; parsing?: { complete: number } }; last_error: string | null } };
+type Reader = { filing: { formType: string; accessionNumber: string }; document: { warnings: string[] }; sections: Array<{ id: number; section_label: string; start_offset: number }>; text: string };
 
-function defaultStartDate() {
-  const date = new Date();
-  date.setFullYear(date.getFullYear() - 3);
-  return date.toISOString().slice(0, 10);
-}
-
-function formatAddress(address: Address | null): string | null {
-  if (!address) return null;
-  return [address.street1, address.street2, address.city, address.stateOrCountryDescription ?? address.stateOrCountry, address.zipCode].filter(Boolean).join(", ");
-}
+const startDate = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 3); return d.toISOString().slice(0, 10); };
+const address = (value: Detail["company"]["business_address"]) => value ? [value.street1, value.street2, value.city, value.stateOrCountryDescription ?? value.stateOrCountry, value.zipCode].filter(Boolean).join(", ") : "Not reported";
+const evidence = (filing: Filing) => !filing.is_supported ? "Metadata only" : filing.parse_status === "parsed" ? "Parsed" : filing.source_status === "downloaded" ? "Source saved" : filing.source_status === "failed" ? "Source failed" : "Not acquired";
 
 export function CompanyWorkbench() {
-  const [ticker, setTicker] = useState("");
-  const [startDate, setStartDate] = useState(defaultStartDate);
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [selected, setSelected] = useState<CompanyDetail | null>(null);
-  const [notice, setNotice] = useState("Enter a ticker to create a local research record.");
-  const [busy, setBusy] = useState(false);
-
-  const loadCompanies = async () => {
-    const response = await fetch("/api/v1/companies");
-    if (!response.ok) throw new Error("Company library is unavailable.");
-    setCompanies((await response.json()) as Company[]);
-  };
-
+  const [ticker, setTicker] = useState(""); const [from, setFrom] = useState(startDate); const [companies, setCompanies] = useState<Company[]>([]);
+  const [selected, setSelected] = useState<Detail | null>(null); const [reader, setReader] = useState<Reader | null>(null); const [notice, setNotice] = useState("Add a company or open a record from the library."); const [busy, setBusy] = useState(false);
+  const loadCompanies = async () => { const r = await fetch("/api/v1/companies"); if (!r.ok) throw new Error("Company library is unavailable."); setCompanies(await r.json() as Company[]); };
+  const openCompany = async (id: number) => { const r = await fetch(`/api/v1/companies/${id}`); if (!r.ok) return; setReader(null); setSelected(await r.json() as Detail); };
   useEffect(() => { void loadCompanies().catch(() => undefined); }, []);
+  const poll = async (jobId: number) => { for (let attempt = 0; attempt < 90; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1_000)); const r = await fetch(`/api/v1/jobs/${jobId}`); if (!r.ok) continue; const result = await r.json() as Job; setNotice(`Processing evidence: ${result.job.progress.sourceAcquisition?.complete ?? 0} sources saved; ${result.job.progress.parsing?.complete ?? 0} filings parsed.`); if ((result.job.status === "complete" || result.job.status === "partial") && result.job.company_id) { await loadCompanies(); await openCompany(result.job.company_id); setNotice(result.job.status === "complete" ? "Evidence record updated." : result.job.last_error ?? "Processing stopped; inspect the filing state."); return; } } setNotice("Processing continues in the background. Reopen the company to refresh its ledger."); };
+  const queue = async (filing: Filing, action: "source/acquire" | "parse") => { try { const r = await fetch(`/api/v1/filings/${filing.id}/${action}`, { method: "POST" }); const result = await r.json() as { jobId?: number; error?: string; message?: string }; if (!r.ok) throw new Error(result.error ?? "The work could not be queued."); setNotice(result.message ?? "Work queued."); if (result.jobId) void poll(result.jobId); } catch (error) { setNotice(error instanceof Error ? error.message : "The work could not be queued."); } };
+  const read = async (filing: Filing) => { try { const r = await fetch(`/api/v1/filings/${filing.id}/parsed`); const result = await r.json() as Reader & { error?: string }; if (!r.ok) throw new Error(result.error ?? "This filing is not ready to read."); setReader(result); setNotice(`${filing.form_type} ${filing.filing_date} is open as normalized SEC text.`); } catch (error) { setNotice(error instanceof Error ? error.message : "This filing is not ready to read."); } };
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); try { const r = await fetch("/api/v1/companies", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ticker, startDate: from }) }); const result = await r.json() as { outcome?: string; companyId?: number; jobId?: number; message?: string; error?: string }; if (!r.ok) throw new Error(result.error ?? "Company intake failed."); setNotice(result.message ?? "Company intake queued."); if (result.outcome === "existing" && result.companyId) { await loadCompanies(); await openCompany(result.companyId); } else if (result.jobId) void poll(result.jobId); } catch (error) { setNotice(error instanceof Error ? error.message : "Company intake failed."); } finally { setBusy(false); } };
 
-  const openCompany = async (id: number) => {
-    const response = await fetch(`/api/v1/companies/${id}`);
-    if (!response.ok) return;
-    setSelected((await response.json()) as CompanyDetail);
-  };
-
-  const acquireSource = async (filing: Filing) => {
-    try {
-      const response = await fetch(`/api/v1/filings/${filing.id}/source/acquire`, { method: "POST" });
-      const result = (await response.json()) as { jobId?: number; error?: string; message?: string };
-      if (!response.ok) throw new Error(result.error ?? "Source acquisition could not be queued.");
-      setNotice(result.message ?? "Primary SEC source acquisition queued.");
-      if (result.jobId) void pollJob(result.jobId);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Source acquisition could not be queued.");
-    }
-  };
-
-  const pollJob = async (jobId: number) => {
-    for (let attempt = 0; attempt < 90; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      const response = await fetch(`/api/v1/jobs/${jobId}`);
-      if (!response.ok) continue;
-      const result = (await response.json()) as Job;
-      const filings = result.job.progress.filings;
-      const sources = result.job.progress.sourceAcquisition;
-      setNotice(`Processing: identity ${result.job.progress.identity ?? "queued"}; metadata ${result.job.progress.metadata ?? "queued"}; ${sources ? `sources ${sources.complete} acquired, ${sources.queued} queued` : `filings ${filings?.total ?? 0} stored`}.`);
-      if (result.job.status === "complete" && result.job.company_id) {
-        await loadCompanies();
-        await openCompany(result.job.company_id);
-        setNotice(`Evidence intake complete. ${filings?.total ?? 0} filings are indexed and ${sources?.complete ?? 0} primary SEC sources are preserved locally.`);
-        return;
-      }
-      if (result.job.status === "partial") {
-        setNotice(result.job.last_error ?? "Processing paused with a retryable error.");
-        return;
-      }
-    }
-    setNotice("Processing continues in the background. Refresh this page to check progress.");
-  };
-
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setBusy(true);
-    try {
-      const response = await fetch("/api/v1/companies", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticker, startDate }),
-      });
-      const result = (await response.json()) as { outcome?: string; companyId?: number; jobId?: number; message?: string; error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Company intake failed.");
-      setNotice(result.message ?? "Company intake queued.");
-      if (result.outcome === "existing" && result.companyId) {
-        await loadCompanies();
-        await openCompany(result.companyId);
-      } else if (result.jobId) {
-        void pollJob(result.jobId);
-      }
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Company intake failed.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="workbench" aria-labelledby="company-heading">
-      <div className="workbench-head">
-        <div>
-          <p className="section-label">Company library</p>
-          <h2 id="company-heading">Build the filing record.</h2>
-        </div>
-        <p className="range-note">Three-year default · filing date through today</p>
-      </div>
-      <form className="company-form" onSubmit={submit}>
-        <label>
-          <span>Ticker</span>
-          <input value={ticker} onChange={(event) => setTicker(event.target.value.toUpperCase())} placeholder="LINC" autoComplete="off" required />
-        </label>
-        <label>
-          <span>Start date</span>
-          <input type="date" value={startDate} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setStartDate(event.target.value)} required />
-        </label>
-        <button type="submit" disabled={busy}>{busy ? "Queueing…" : "Add company"}</button>
-      </form>
-      <p className="intake-note" aria-live="polite">{notice}</p>
-
-      <div className="library-grid">
-        <div className="company-list" aria-label="Stored companies">
-          {companies.length === 0 ? <p className="empty-state">No companies are stored yet.</p> : companies.map((company) => (
-            <button className="company-row" key={company.id} type="button" onClick={() => void openCompany(company.id)}>
-              <span>{company.tickers.join(", ")}</span>
-              <strong>{company.legal_name}</strong>
-              <small>CIK {String(company.cik).padStart(10, "0")} · {company.ingestion_status ?? "stored"}</small>
-            </button>
-          ))}
-        </div>
-        <div className="filing-panel" aria-live="polite">
-          {!selected ? <p className="empty-state">Select a company to inspect its local filing index.</p> : <>
-            <p className="section-label">{selected.company.legal_name}</p>
-            <h3>Filing index</h3>
-            <p className="filing-context">CIK {String(selected.company.cik).padStart(10, "0")} · coverage from {selected.company.earliest_requested_filing_date ?? "—"}</p>
-            <dl className="company-profile">
-              <div><dt>SEC industry</dt><dd>{selected.company.sic_description ?? selected.company.sic ?? "Not reported"}</dd></div>
-              <div><dt>Entity</dt><dd>{selected.company.entity_type ?? "Not reported"}</dd></div>
-              <div><dt>Incorporated in</dt><dd>{selected.company.state_of_incorporation_description ?? selected.company.state_of_incorporation ?? "Not reported"}</dd></div>
-              <div><dt>Business address</dt><dd>{formatAddress(selected.company.business_address) ?? "Not reported"}</dd></div>
-            </dl>
-            <ol className="filing-list">
-              {selected.filings.map((filing) => <li key={filing.id}><span>{filing.form_type}</span><time>{filing.filing_date}</time><small>{filing.is_supported ? filing.source_status === "downloaded" ? "Source preserved" : <button className="source-action" type="button" onClick={() => void acquireSource(filing)}>{filing.source_status === "failed" ? "Retry source" : "Acquire source"}</button> : "Metadata only"}</small></li>)}
-            </ol>
-          </>}
-        </div>
-      </div>
-    </section>
-  );
+  return <section className="research-desk" aria-labelledby="research-heading">
+    <aside className="company-rail"><div className="rail-heading"><p>Research library</p><strong>{companies.length} stored</strong></div><form className="intake-form" onSubmit={submit}><label>Ticker<input value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="LINC" required /></label><label>Coverage begins<input type="date" value={from} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setFrom(e.target.value)} required /></label><button type="submit" disabled={busy}>{busy ? "Queueing…" : "Add record"}</button></form><div className="company-list">{companies.length === 0 ? <p className="empty-state">No local records. Add a ticker to begin.</p> : companies.map((company) => <button className={`company-row ${selected?.company.id === company.id ? "is-selected" : ""}`} key={company.id} onClick={() => void openCompany(company.id)}><span>{company.tickers.join(", ")}</span><strong>{company.legal_name}</strong><small>CIK {String(company.cik).padStart(10, "0")}</small></button>)}</div></aside>
+    <div className="desk-main"><p className="desk-notice" aria-live="polite">{notice}</p>{!selected ? <div className="desk-empty"><p>Evidence ledger</p><h2 id="research-heading">Open a company record.</h2><span>Choose an existing company or add a ticker. secThing keeps the evidence local and its state explicit.</span></div> : <><header className="company-brief"><div><p>Issuer record</p><h2 id="research-heading">{selected.company.legal_name}</h2><span>{selected.company.exchange ?? "SEC issuer"} · CIK {String(selected.company.cik).padStart(10, "0")}</span></div><dl><div><dt>Coverage</dt><dd>{selected.company.earliest_requested_filing_date ?? "Not set"}</dd></div><div><dt>Industry</dt><dd>{selected.company.sic_description ?? selected.company.sic ?? "Not reported"}</dd></div><div><dt>Jurisdiction</dt><dd>{selected.company.state_of_incorporation_description ?? "Not reported"}</dd></div><div><dt>SEC address</dt><dd>{address(selected.company.business_address)}</dd></div></dl></header><div className="ledger-heading"><div><p>Filing ledger</p><h3>Evidence coverage</h3></div><span>{selected.filings.length} filings indexed</span></div><div className="ledger-scroll"><table className="filing-ledger"><thead><tr><th>Form</th><th>Filed</th><th>Report period</th><th>Evidence state</th><th>Action</th></tr></thead><tbody>{selected.filings.map((filing) => <tr key={filing.id}><td><strong>{filing.form_type}</strong><small>{filing.accession_number}</small></td><td>{filing.filing_date}</td><td>{filing.report_date ?? "—"}</td><td><span className={`evidence-state is-${evidence(filing).toLowerCase().replaceAll(" ", "-")}`}>{evidence(filing)}</span></td><td>{!filing.is_supported ? "—" : filing.parse_status === "parsed" ? <button className="ledger-action" onClick={() => void read(filing)}>Read filing</button> : filing.source_status === "downloaded" ? <button className="ledger-action" onClick={() => void queue(filing, "parse")}>Parse filing</button> : <button className="ledger-action" onClick={() => void queue(filing, "source/acquire")}>{filing.source_status === "failed" ? "Retry source" : "Acquire source"}</button>}</td></tr>)}</tbody></table></div>{reader && <section className="source-reader"><aside><p>Source reader</p><strong>{reader.filing.formType}</strong><span>{reader.filing.accessionNumber}</span><nav>{reader.sections.map((s) => <a href={`#span-${s.id}`} key={s.id}>{s.section_label}</a>)}</nav>{reader.document.warnings.map((warning) => <small key={warning}>{warning}</small>)}</aside><article>{reader.sections.length ? reader.sections.map((s, i) => <section id={`span-${s.id}`} key={s.id}><h4>{s.section_label}</h4><pre>{reader.text.slice(s.start_offset, reader.sections[i + 1]?.start_offset ?? reader.text.length)}</pre></section>) : <pre>{reader.text}</pre>}</article></section>}</>}</div>
+  </section>;
 }
