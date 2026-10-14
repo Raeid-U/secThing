@@ -7,3 +7,4 @@ export { SecClient, canonicalCik, filingArchiveDirectoryUrl, isSupportedMvpForm,
 export { FilingParser, detectFilingSections, filingParserVersion, normalizeFilingText, type ParsedFiling, type ParsedFilingSection } from "./filing-parser.js";
 export { ChunkingAndIndexing, chunkingProfileVersion, type ChunkingSection, type IndexedChunk } from "./chunking.js";
 export { backfillSearchIndex, chunkDocument, parseFilingSource } from "./evidence-pipeline.js";
+export { Retrieval, embeddingSettings, type SearchMode, type SearchFilters } from "./retrieval.js";

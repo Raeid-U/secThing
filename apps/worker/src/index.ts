@@ -1,5 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { backfillSearchIndex, chunkDocument, parseFilingSource, connectDatabase, assessWorkerReadiness, filingParserVersion, isSupportedMvpForm, loadConfig, SecClient, type CompanySubmission } from "@secthing/platform";
+import {
+  Retrieval,
+  backfillSearchIndex,
+  chunkDocument,
+  parseFilingSource,
+  connectDatabase,
+  assessWorkerReadiness,
+  filingParserVersion,
+  isSupportedMvpForm,
+  loadConfig,
+  SecClient,
+  type CompanySubmission,
+} from "@secthing/platform";
 
 const config = loadConfig();
 const readiness = await assessWorkerReadiness(config);
@@ -8,16 +20,51 @@ if (readiness.status !== "ready") {
   process.exit(1);
 }
 
-console.info(JSON.stringify({ event: "worker.ready", checks: readiness.checks }));
+console.info(
+  JSON.stringify({ event: "worker.ready", checks: readiness.checks }),
+);
 const sql = connectDatabase(config.databaseUrl);
 const workerId = `worker-${randomUUID()}`;
-const sec = new SecClient({ dataDir: config.dataDir, userAgent: config.secUserAgent, rateLimitPerSecond: config.secRateLimitPerSecond });
+const sec = new SecClient({
+  dataDir: config.dataDir,
+  userAgent: config.secUserAgent,
+  rateLimitPerSecond: config.secRateLimitPerSecond,
+});
+const retrieval = new Retrieval(sql, config);
 
-type WorkItem = { id: number; job_id: number; work_type: "resolve_company" | "fetch_metadata" | "acquire_filing_source" | "parse_filing_source" | "chunk_document"; company_id: number | null; filing_id: number | null; document_id: number | null; attempt_count: number; input: { ticker?: string; startDate?: string } };
+type WorkItem = {
+  id: number;
+  job_id: number;
+  work_type:
+    | "resolve_company"
+    | "resolve_company_preview"
+    | "fetch_metadata"
+    | "acquire_filing_source"
+    | "parse_filing_source"
+    | "chunk_document"
+    | "embed_document";
+  company_id: number | null;
+  filing_id: number | null;
+  document_id: number | null;
+  attempt_count: number;
+  input: { ticker?: string; startDate?: string; profileKey?: string };
+};
 type Company = { id: number; cik: number };
-type SourceFiling = { id: number; cik: number; accession_number: string; form_type: string; primary_document: string | null };
+type SourceFiling = {
+  id: number;
+  cik: number;
+  accession_number: string;
+  form_type: string;
+  primary_document: string | null;
+};
 
-async function storeResponse(response: { url: string; status: number; contentType: string | null; bodyPath: string; contentHash: string }) {
+async function storeResponse(response: {
+  url: string;
+  status: number;
+  contentType: string | null;
+  bodyPath: string;
+  contentHash: string;
+}) {
   await sql`
     INSERT INTO sec_responses (url, response_status, content_type, body_path, content_hash)
     VALUES (${response.url}, ${response.status}, ${response.contentType}, ${response.bodyPath}, ${response.contentHash})
@@ -41,8 +88,14 @@ async function claimWork(): Promise<WorkItem | undefined> {
   return claimed[0];
 }
 
-async function upsertCompany(cik: number, name: string, ticker: string): Promise<{ company: Company; existed: boolean }> {
-  const prior = await sql<Company[]>`SELECT id, cik FROM companies WHERE cik = ${cik}`;
+async function upsertCompany(
+  cik: number,
+  name: string,
+  ticker: string,
+): Promise<{ company: Company; existed: boolean }> {
+  const prior = await sql<
+    Company[]
+  >`SELECT id, cik FROM companies WHERE cik = ${cik}`;
   const rows = await sql<Company[]>`
     INSERT INTO companies (cik, legal_name, identity_source, identity_fetched_at)
     VALUES (${cik}, ${name}, 'sec_ticker_mapping', now())
@@ -61,9 +114,17 @@ async function upsertCompany(cik: number, name: string, ticker: string): Promise
 async function resolveCompany(item: WorkItem): Promise<void> {
   const ticker = item.input.ticker;
   const startDate = item.input.startDate;
-  if (!ticker || !startDate) throw new Error("Resolve work item is missing ticker or start date.");
+  if (!ticker || !startDate)
+    throw new Error("Resolve work item is missing ticker or start date.");
   const { match, response } = await sec.resolveTicker(ticker);
   await storeResponse(response);
+  if (item.work_type === "resolve_company_preview") {
+    const prior = await sql<Company[]>`SELECT id, cik FROM companies WHERE cik = ${match.cik}`;
+    await sql`UPDATE jobs SET company_id = ${prior[0]?.id ?? null}, status = 'complete',
+      progress = ${sql.json({ identity: "complete", company: { id: prior[0]?.id ?? null, cik: match.cik, name: match.title, ticker: match.ticker, existed: prior.length > 0 } })},
+      updated_at = now() WHERE id = ${item.job_id}`;
+    return;
+  }
   const { company, existed } = await upsertCompany(match.cik, match.title, match.ticker);
   await sql`UPDATE jobs SET company_id = ${company.id}, status = 'running', progress = ${sql.json({ identity: "complete", metadata: "queued", filings: { discovered: 0, total: 0 }, existingCompany: existed })}, updated_at = now() WHERE id = ${item.job_id}`;
   await sql`
@@ -72,9 +133,14 @@ async function resolveCompany(item: WorkItem): Promise<void> {
   `;
 }
 
-async function persistSubmission(company: Company, submission: CompanySubmission, startDate: string): Promise<{ discovered: number; total: number }> {
+async function persistSubmission(
+  company: Company,
+  submission: CompanySubmission,
+  startDate: string,
+): Promise<{ discovered: number; total: number }> {
   const today = new Date().toISOString().slice(0, 10);
-  for (const response of submission.cachedResponses) await storeResponse(response);
+  for (const response of submission.cachedResponses)
+    await storeResponse(response);
   await sql`
     UPDATE companies
     SET legal_name = ${submission.name}, sic = ${submission.sic ?? null}, sic_description = ${submission.sicDescription ?? null}, entity_type = ${submission.entityType ?? null},
@@ -95,7 +161,9 @@ async function persistSubmission(company: Company, submission: CompanySubmission
     `;
   }
   await sql`UPDATE companies SET exchange = COALESCE(${submission.exchanges[0] ?? null}, exchange), updated_at = now() WHERE id = ${company.id}`;
-  const relevant = submission.filings.filter((filing) => filing.filingDate >= startDate && filing.filingDate <= today);
+  const relevant = submission.filings.filter(
+    (filing) => filing.filingDate >= startDate && filing.filingDate <= today,
+  );
   for (const filing of relevant) {
     await sql`
       INSERT INTO filings (company_id, cik, accession_number, form_type, filing_date, report_date, primary_document, items, is_xbrl, is_inline_xbrl, is_supported)
@@ -106,15 +174,21 @@ async function persistSubmission(company: Company, submission: CompanySubmission
         is_inline_xbrl = EXCLUDED.is_inline_xbrl, is_supported = EXCLUDED.is_supported, updated_at = now()
     `;
   }
-  const total = await sql<{ count: number }[]>`SELECT count(*)::integer AS count FROM filings WHERE company_id = ${company.id}`;
+  const total = await sql<
+    { count: number }[]
+  >`SELECT count(*)::integer AS count FROM filings WHERE company_id = ${company.id}`;
   return { discovered: relevant.length, total: total[0].count };
 }
 
 async function fetchMetadata(item: WorkItem): Promise<void> {
-  if (!item.company_id) throw new Error("Metadata work item is missing a company.");
+  if (!item.company_id)
+    throw new Error("Metadata work item is missing a company.");
   const startDate = item.input.startDate;
-  if (!startDate) throw new Error("Metadata work item is missing a start date.");
-  const companies = await sql<Company[]>`SELECT id, cik FROM companies WHERE id = ${item.company_id}`;
+  if (!startDate)
+    throw new Error("Metadata work item is missing a start date.");
+  const companies = await sql<
+    Company[]
+  >`SELECT id, cik FROM companies WHERE id = ${item.company_id}`;
   const company = companies[0];
   if (!company) throw new Error("Company no longer exists.");
   const submission = await sec.fetchCompanySubmission(company.cik);
@@ -129,7 +203,10 @@ async function fetchMetadata(item: WorkItem): Promise<void> {
   `;
 }
 
-async function queueSourceAcquisition(jobId: number, companyId: number): Promise<number> {
+async function queueSourceAcquisition(
+  jobId: number,
+  companyId: number,
+): Promise<number> {
   const queued = await sql<{ id: number }[]>`
     INSERT INTO work_items (job_id, work_type, company_id, filing_id, input)
     SELECT ${jobId}, 'acquire_filing_source', filings.company_id, filings.id, '{}'::jsonb
@@ -153,7 +230,8 @@ async function queueSourceAcquisition(jobId: number, companyId: number): Promise
 }
 
 async function acquireFilingSource(item: WorkItem): Promise<void> {
-  if (!item.filing_id) throw new Error("Source-acquisition work item is missing a filing.");
+  if (!item.filing_id)
+    throw new Error("Source-acquisition work item is missing a filing.");
   const filings = await sql<SourceFiling[]>`
     SELECT id, cik, accession_number, form_type, primary_document
     FROM filings WHERE id = ${item.filing_id}
@@ -180,7 +258,12 @@ async function acquireFilingSource(item: WorkItem): Promise<void> {
   await queueParsing(item.job_id, item.company_id, filing.id, documents[0].id);
 }
 
-async function queueParsing(jobId: number, companyId: number | null, filingId: number, documentId: number): Promise<void> {
+async function queueParsing(
+  jobId: number,
+  companyId: number | null,
+  filingId: number,
+  documentId: number,
+): Promise<void> {
   await sql`
     INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
     SELECT ${jobId}, 'parse_filing_source', ${companyId}, ${filingId}, ${documentId}, '{}'::jsonb
@@ -202,7 +285,19 @@ async function queueParsing(jobId: number, companyId: number | null, filingId: n
 }
 
 async function refreshPipelineProgress(jobId: number): Promise<void> {
-  const rows = await sql<{ source_queued: number; source_complete: number; source_failed: number; parse_queued: number; parse_complete: number; parse_failed: number; chunk_queued: number; chunk_complete: number; chunk_failed: number }[]>`
+  const rows = await sql<
+    {
+      source_queued: number;
+      source_complete: number;
+      source_failed: number;
+      parse_queued: number;
+      parse_complete: number;
+      parse_failed: number;
+      chunk_queued: number;
+      chunk_complete: number;
+      chunk_failed: number;
+    }[]
+  >`
     SELECT
       count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status IN ('pending', 'running'))::integer AS source_queued,
       count(*) FILTER (WHERE work_type = 'acquire_filing_source' AND status = 'complete')::integer AS source_complete,
@@ -216,16 +311,48 @@ async function refreshPipelineProgress(jobId: number): Promise<void> {
     FROM work_items WHERE job_id = ${jobId}
   `;
   const progress = rows[0];
-  const failed = progress.source_failed + progress.parse_failed + progress.chunk_failed;
-  const queued = progress.source_queued + progress.parse_queued + progress.chunk_queued;
-  const status = queued > 0 ? 'running' : failed > 0 ? 'partial' : 'complete';
+  const failed =
+    progress.source_failed + progress.parse_failed + progress.chunk_failed;
+  const queued =
+    progress.source_queued + progress.parse_queued + progress.chunk_queued;
+  const status = queued > 0 ? "running" : failed > 0 ? "partial" : "complete";
   await sql`
     UPDATE jobs
     SET status = ${status},
         progress = progress || ${sql.json({
-          sourceAcquisition: { status: progress.source_failed > 0 ? 'partial' : progress.source_queued > 0 ? 'running' : 'complete', queued: progress.source_queued, complete: progress.source_complete, failed: progress.source_failed },
-          parsing: { status: progress.parse_failed > 0 ? 'partial' : progress.parse_queued > 0 ? 'running' : 'complete', queued: progress.parse_queued, complete: progress.parse_complete, failed: progress.parse_failed },
-          chunking: { status: progress.chunk_failed > 0 ? 'partial' : progress.chunk_queued > 0 ? 'running' : 'complete', queued: progress.chunk_queued, complete: progress.chunk_complete, failed: progress.chunk_failed },
+          sourceAcquisition: {
+            status:
+              progress.source_failed > 0
+                ? "partial"
+                : progress.source_queued > 0
+                  ? "running"
+                  : "complete",
+            queued: progress.source_queued,
+            complete: progress.source_complete,
+            failed: progress.source_failed,
+          },
+          parsing: {
+            status:
+              progress.parse_failed > 0
+                ? "partial"
+                : progress.parse_queued > 0
+                  ? "running"
+                  : "complete",
+            queued: progress.parse_queued,
+            complete: progress.parse_complete,
+            failed: progress.parse_failed,
+          },
+          chunking: {
+            status:
+              progress.chunk_failed > 0
+                ? "partial"
+                : progress.chunk_queued > 0
+                  ? "running"
+                  : "complete",
+            queued: progress.chunk_queued,
+            complete: progress.chunk_complete,
+            failed: progress.chunk_failed,
+          },
         })},
         updated_at = now()
     WHERE id = ${jobId}
@@ -237,45 +364,110 @@ async function completeWork(item: WorkItem): Promise<void> {
 }
 
 async function failWork(item: WorkItem, error: unknown): Promise<void> {
-  const message = error instanceof Error ? error.message : "Unknown worker failure.";
+  const message =
+    error instanceof Error ? error.message : "Unknown worker failure.";
   const retry = item.attempt_count < 3;
   await sql`
     UPDATE work_items
-    SET status = ${retry ? 'pending' : 'failed'}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
-        error_code = ${item.work_type === 'acquire_filing_source' ? 'source_acquisition_failed' : item.work_type === 'parse_filing_source' ? 'filing_parse_failed' : item.work_type === 'chunk_document' ? 'filing_chunking_failed' : 'sec_ingestion_failed'}, error_message = ${message}, updated_at = now()
+    SET status = ${retry ? "pending" : "failed"}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
+        error_code = ${item.work_type === "embed_document" ? "embedding_failed" : item.work_type === "acquire_filing_source" ? "source_acquisition_failed" : item.work_type === "parse_filing_source" ? "filing_parse_failed" : item.work_type === "chunk_document" ? "filing_chunking_failed" : "sec_ingestion_failed"}, error_message = ${message}, updated_at = now()
     WHERE id = ${item.id}
   `;
-  await sql`UPDATE jobs SET status = ${retry ? 'running' : 'partial'}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
-  console.error(JSON.stringify({ event: "worker.work_failed", workItemId: item.id, jobId: item.job_id, message }));
+  await sql`UPDATE jobs SET status = ${retry ? "running" : "partial"}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
+  console.error(
+    JSON.stringify({
+      event: "worker.work_failed",
+      workItemId: item.id,
+      jobId: item.job_id,
+      message,
+    }),
+  );
 }
 
 await sql`UPDATE work_items SET status = 'pending', lease_owner = null, lease_expires_at = null, updated_at = now() WHERE status = 'running' AND lease_expires_at < now()`;
 
 const backfill = await backfillSearchIndex(sql);
 console.info(JSON.stringify({ event: "worker.search_backfill", ...backfill }));
+await retrieval.queue();
 
 let polling = false;
+let lastEmbeddingScan = Date.now();
 const idleLoop = setInterval(() => {
   if (polling) return;
   polling = true;
   void (async () => {
     const item = await claimWork();
-    if (!item) return;
-    try {
-      if (item.work_type === "resolve_company") await resolveCompany(item);
-      else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
-      else if (item.work_type === "acquire_filing_source") await acquireFilingSource(item);
-      else if (item.work_type === "parse_filing_source") await parseFilingSource(sql, config, item);
-      else await chunkDocument(sql, item);
-      await completeWork(item);
-      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source" || item.work_type === "chunk_document") await refreshPipelineProgress(item.job_id);
-      console.info(JSON.stringify({ event: "worker.work_complete", workItemId: item.id, jobId: item.job_id, workType: item.work_type }));
-    } catch (error) {
-      console.error(JSON.stringify({ event: "worker.work_exception", workItemId: item.id, jobId: item.job_id, workType: item.work_type, stack: error instanceof Error ? error.stack : undefined }));
-      await failWork(item, error);
-      if (item.work_type === "acquire_filing_source" || item.work_type === "parse_filing_source" || item.work_type === "chunk_document") await refreshPipelineProgress(item.job_id);
+    if (!item) {
+      if (Date.now() - lastEmbeddingScan > 30_000) {
+        lastEmbeddingScan = Date.now();
+        await retrieval.queue();
+      }
+      return;
     }
-  })().catch((error: unknown) => console.error(JSON.stringify({ event: "worker.poll_failed", message: error instanceof Error ? error.message : "Unknown poll failure." }))).finally(() => { polling = false; });
+    try {
+      if (
+        item.work_type === "resolve_company" ||
+        item.work_type === "resolve_company_preview"
+      )
+        await resolveCompany(item);
+      else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
+      else if (item.work_type === "acquire_filing_source")
+        await acquireFilingSource(item);
+      else if (item.work_type === "parse_filing_source")
+        await parseFilingSource(sql, config, item);
+      else if (item.work_type === "chunk_document") {
+        await chunkDocument(sql, item);
+        await retrieval.queue(item.company_id ?? undefined);
+      } else {
+        await retrieval.embedDocument(item.document_id!, item.input.profileKey);
+        await sql`UPDATE jobs SET status = 'complete', progress = '{"embeddings":"complete"}', updated_at = now() WHERE id = ${item.job_id}`;
+      }
+      await completeWork(item);
+      if (
+        item.work_type === "acquire_filing_source" ||
+        item.work_type === "parse_filing_source" ||
+        item.work_type === "chunk_document"
+      )
+        await refreshPipelineProgress(item.job_id);
+      console.info(
+        JSON.stringify({
+          event: "worker.work_complete",
+          workItemId: item.id,
+          jobId: item.job_id,
+          workType: item.work_type,
+        }),
+      );
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "worker.work_exception",
+          workItemId: item.id,
+          jobId: item.job_id,
+          workType: item.work_type,
+          stack: error instanceof Error ? error.stack : undefined,
+        }),
+      );
+      await failWork(item, error);
+      if (
+        item.work_type === "acquire_filing_source" ||
+        item.work_type === "parse_filing_source" ||
+        item.work_type === "chunk_document"
+      )
+        await refreshPipelineProgress(item.job_id);
+    }
+  })()
+    .catch((error: unknown) =>
+      console.error(
+        JSON.stringify({
+          event: "worker.poll_failed",
+          message:
+            error instanceof Error ? error.message : "Unknown poll failure.",
+        }),
+      ),
+    )
+    .finally(() => {
+      polling = false;
+    });
 }, 500);
 const stop = () => {
   clearInterval(idleLoop);

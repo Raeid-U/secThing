@@ -31,9 +31,10 @@ const environmentSchema = z.object({
   LOCAL_ONLY: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
 }).superRefine((environment, context) => {
   if (environment.AI_MODE === "disabled") return;
-  if (!environment.AI_CHAT_PROVIDER || !environment.AI_CHAT_BASE_URL) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "AI_CHAT_PROVIDER and AI_CHAT_BASE_URL are required when AI_MODE is enabled." });
+  if (!environment.AI_CHAT_BASE_URL && !environment.AI_EMBEDDING_BASE_URL) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A chat or embedding provider endpoint is required when AI_MODE is enabled." });
   }
+  if (environment.AI_MODE === "external" && environment.LOCAL_ONLY) context.addIssue({ code: z.ZodIssueCode.custom, message: "Disable LOCAL_ONLY explicitly before using external AI." });
 });
 
 export type PlatformConfig = {

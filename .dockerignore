@@ -2,6 +2,10 @@ node_modules
 **/node_modules
 dist
 **/dist
+.next
+**/.next
+test-results
+playwright-report
 .git
 .env
 data

@@ -67,7 +67,7 @@ export class OllamaClient implements ChatProvider, EmbeddingProvider {
     const body = await this.request("/api/embed", { method: "POST", body: JSON.stringify({ model: request.model, input: request.inputs }) });
     const response = body as Record<string, unknown>;
     const embeddings = Array.isArray(response.embeddings)
-      ? response.embeddings.filter((embedding): embedding is number[] => Array.isArray(embedding) && embedding.every((value) => typeof value === "number"))
+      ? response.embeddings.filter((embedding): embedding is number[] => Array.isArray(embedding) && embedding.every((value) => typeof value === "number" && Number.isFinite(value)))
       : [];
     if (embeddings.length !== request.inputs.length) throw new Error("Ollama returned an unexpected embedding response.");
     return { model: typeof response.model === "string" ? response.model : request.model, embeddings };
@@ -100,21 +100,24 @@ function createOllamaClient(config: PlatformConfig): OllamaClient | undefined {
 
 export async function inspectAiRuntime(config: PlatformConfig): Promise<AiRuntimeStatus> {
   if (config.aiMode === "disabled") return { mode: config.aiMode, status: "disabled", models: [], chat: { available: false }, embeddings: { available: false } };
-  const client = createOllamaClient(config);
-  if (!client) return { mode: config.aiMode, status: "unavailable", detail: "No supported chat provider is configured.", models: [], chat: { configuredModel: config.aiChatModel, available: false }, embeddings: { configuredModel: config.aiEmbeddingModel, available: false } };
-  try {
-    const models = await client.listModels();
-    return {
-      mode: config.aiMode,
-      provider: "ollama",
-      status: "available",
-      models,
-      chat: { configuredModel: config.aiChatModel, available: matchingModel(models, config.aiChatModel) },
-      embeddings: { configuredModel: config.aiEmbeddingModel, available: matchingModel(models, config.aiEmbeddingModel) },
-    };
-  } catch (error) {
-    return { mode: config.aiMode, provider: "ollama", status: "unavailable", detail: errorMessage(error), models: [], chat: { configuredModel: config.aiChatModel, available: false }, embeddings: { configuredModel: config.aiEmbeddingModel, available: false } };
-  }
+  const chatClient = createOllamaClient(config);
+  const embeddingClient = config.aiEmbeddingProvider === "ollama" && config.aiEmbeddingBaseUrl
+    ? new OllamaClient({ baseUrl: config.aiEmbeddingBaseUrl, apiKey: config.aiEmbeddingApiKey, timeoutMs: config.aiRequestTimeoutMs }) : undefined;
+  const failures: string[] = [];
+  let reachable = false;
+  const inspect = async (client: OllamaClient | undefined) => {
+    if (!client) return [];
+    try { const models = await client.listModels(); reachable = true; return models; }
+    catch (error) { failures.push(errorMessage(error)); return []; }
+  };
+  const [chatModels, embeddingModels] = await Promise.all([inspect(chatClient), inspect(embeddingClient)]);
+  return {
+    mode: config.aiMode, provider: "ollama", status: reachable ? "available" : "unavailable",
+    ...(failures.length ? { detail: failures.join("; ") } : {}),
+    models: [...new Map([...chatModels, ...embeddingModels].map((model) => [model.name, model])).values()],
+    chat: { configuredModel: config.aiChatModel, available: matchingModel(chatModels, config.aiChatModel) },
+    embeddings: { configuredModel: config.aiEmbeddingModel, available: matchingModel(embeddingModels, config.aiEmbeddingModel) },
+  };
 }
 
 export async function verifyAiChat(config: PlatformConfig): Promise<ChatResponse> {

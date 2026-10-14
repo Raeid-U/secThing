@@ -1,6 +1,17 @@
 name: secthing
 
 services:
+  # One writer refreshes the persistent dependency volume before app startup.
+  dependencies:
+    build:
+      context: .
+      target: development
+    command: ["npm", "ci", "--no-audit", "--no-fund"]
+    volumes:
+      - .:/app
+      - node-modules:/app/node_modules
+    networks: [internal]
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -45,6 +56,8 @@ services:
       - node-modules:/app/node_modules
       - ./data:/app/data
     depends_on:
+      dependencies:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     ports:
@@ -84,26 +97,28 @@ services:
       - node-modules:/app/node_modules
       - ./data:/app/data
     depends_on:
+      dependencies:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      ollama-models:
+        condition: service_completed_successfully
+        required: false
     networks: [internal]
 
   frontend:
     build:
       context: .
       target: development
-    # Source is mounted in the foundation image; Next development mode provides
-    # the equivalent live-reload behavior that Vite previously supplied here.
-    # The named dependency volume survives image rebuilds. Reconcile it against
-    # package-lock.json so a newly added workspace dependency (such as Next)
-    # cannot be hidden by an older volume before the development server starts.
-    command: ["sh", "-c", "rm -rf apps/frontend/.next && npm install --no-audit --no-fund && npm run dev --workspace=@secthing/frontend"]
+    command: ["npm", "run", "dev", "--workspace=@secthing/frontend"]
     environment:
       BACKEND_API_URL: http://backend:8080
     volumes:
       - .:/app
       - node-modules:/app/node_modules
     depends_on:
+      dependencies:
+        condition: service_completed_successfully
       backend:
         condition: service_healthy
     ports:
@@ -117,6 +132,32 @@ services:
       OLLAMA_HOST: 0.0.0.0:11434
     volumes:
       - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "OLLAMA_HOST=http://127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [internal]
+
+  ollama-models:
+    image: ollama/ollama:latest
+    profiles: ["ollama-cpu", "ollama-nvidia"]
+    entrypoint: ["/bin/sh", "/bootstrap/pull-ollama-models.sh"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      AI_MODE: ${AI_MODE:-disabled}
+      AI_CHAT_PROVIDER: ${AI_CHAT_PROVIDER:-}
+      AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-}
+      AI_CHAT_MODEL: ${AI_CHAT_MODEL:-}
+      AI_EMBEDDING_PROVIDER: ${AI_EMBEDDING_PROVIDER:-}
+      AI_EMBEDDING_BASE_URL: ${AI_EMBEDDING_BASE_URL:-}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-}
+    volumes:
+      - ./scripts/pull-ollama-models.sh:/bootstrap/pull-ollama-models.sh:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
     networks: [internal]
 
 volumes:

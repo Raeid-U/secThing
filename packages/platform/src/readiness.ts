@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { connectDatabase } from "./database.js";
 import { migrationsAreCurrent } from "./migrations.js";
 import type { PlatformConfig } from "./config.js";
+import { embeddingSettings } from "./retrieval.js";
 
 export type Check = { name: string; status: "pass" | "fail"; detail?: string };
 export type Readiness = { status: "ready" | "not_ready"; checks: Check[] };
@@ -50,8 +51,8 @@ export function capabilities(config: PlatformConfig) {
   return {
     companyIngestion: Boolean(config.secUserAgent),
     filingSearch: true,
-    filingSearchUi: false,
-    semanticSearch: false,
+    filingSearchUi: true,
+    semanticSearch: Boolean(embeddingSettings(config)),
     ragChat: false,
     aiMode: config.aiMode,
     localOnly: config.localOnly,

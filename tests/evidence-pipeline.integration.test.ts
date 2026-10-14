@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, loadConfig, parseFilingSource } from "@secthing/platform";
+import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, loadConfig, parseFilingSource, Retrieval } from "@secthing/platform";
 import { buildServer } from "../apps/backend/src/server.js";
 
 // Use a disposable PostgreSQL instance. Never fall back to the application's DATABASE_URL.
@@ -22,7 +22,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await admin.unsafe(`CREATE SCHEMA "${schema}"`);
     await applyMigrations(sql);
     dataDir = await mkdtemp(join(tmpdir(), "secthing-evidence-test-"));
-    app = buildServer(loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir }));
+    app = buildServer(loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, SEC_USER_AGENT: "secThing test test@example.com" }));
   }, 30_000);
 
   afterAll(async () => {
@@ -159,5 +159,128 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect((await app.inject({ method: "POST", url })).statusCode).toBe(202);
     expect((await app.inject({ method: "POST", url })).json()).toEqual({ queued: 0, jobIds: [] });
     expect((await app.inject({ method: "POST", url: `/api/v1/filings/${item.filing_id}/chunk` })).statusCode).toBe(409);
+  });
+
+  function semantic(provider?: { embed: (request: { model: string; inputs: string[] }) => Promise<{ model: string; embeddings: number[][] }> }, extra: Record<string, string> = {}) {
+    const config = loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, AI_MODE: "local",
+      AI_EMBEDDING_PROVIDER: "ollama", AI_EMBEDDING_BASE_URL: "http://fixture", AI_EMBEDDING_MODEL: "fixture-embed", ...extra });
+    return new Retrieval(sql, config, provider ?? { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) });
+  }
+
+  it("indexes vectors and supports semantic and fused search independently of chat", async () => {
+    await parseAndIndex();
+    const first = { ...item };
+    const secondFiling = await sql`INSERT INTO filings (company_id, cik, accession_number, form_type, filing_date, is_supported)
+      VALUES (${item.company_id}, 123, '0000000123-26-000002', '10-Q', '2026-04-01', true) RETURNING id`;
+    const secondDocument = await sql`INSERT INTO filing_documents (filing_id, document_name, document_type, content_type, sec_url, status)
+      VALUES (${secondFiling[0].id}, 'second.html', 'primary', 'text/html', 'https://www.sec.gov/second.html', 'downloaded') RETURNING id`;
+    item = { ...item, filing_id: secondFiling[0].id, document_id: secondDocument[0].id };
+    await source("Cobalt mining output increased.");
+    await parseAndIndex();
+    const retrieval = semantic({ embed: async (request) => ({ model: request.model,
+      embeddings: request.inputs.map((input) => input.includes("Cobalt") ? [0, 1] : [1, 0]) }) });
+    await retrieval.embedDocument(first.document_id);
+    await retrieval.embedDocument(item.document_id);
+    expect(await retrieval.status(item.company_id)).toMatchObject({ configured: true, chunks: 2, embedded: 2 });
+    const meaning = await retrieval.search(item.company_id, "fruit agriculture", "semantic", { limit: 10 });
+    expect(meaning.results).toHaveLength(2);
+    expect(meaning.results[0]).toMatchObject({ chunk_text: expect.stringContaining("Orchard"), text_hash: expect.any(String), document_id: first.document_id });
+    expect(meaning.results[0].rank).toBeGreaterThan(meaning.results[1].rank);
+    const fused = await retrieval.search(item.company_id, "orchard", "hybrid", { limit: 10 });
+    expect(fused.mode).toBe("hybrid");
+    expect(fused.results).toHaveLength(2);
+    expect(fused.results[0].document_id).toBe(first.document_id);
+    expect(await retrieval.search(item.company_id, "fruit agriculture", "semantic", { formType: "8-K", limit: 10 })).toMatchObject({ results: [] });
+  });
+
+  it("keeps keyword search available with an explicit hybrid fallback", async () => {
+    await parseAndIndex();
+    const retrieval = new Retrieval(sql, loadConfig({ DATABASE_URL: scopedUrl.toString() }));
+    expect(await retrieval.search(item.company_id, "orchard", "hybrid", { limit: 10 })).toMatchObject({ mode: "full_text", fallback: expect.any(String), results: [expect.any(Object)] });
+    await expect(retrieval.search(item.company_id, "orchard", "semantic", { limit: 10 })).rejects.toThrow();
+  });
+
+  it("rejects incompatible/nonfinite/zero vectors without persisting them", async () => {
+    await parseAndIndex();
+    for (const vector of [[1, 2, 3], [NaN, 1], [0, 0]]) {
+      const retrieval = semantic({ embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => vector) }) }, { AI_EMBEDDING_DIMENSION: "2" });
+      await expect(retrieval.embedDocument(item.document_id)).rejects.toThrow("incompatible dimensions");
+    }
+    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(0);
+  });
+
+  it("invalidates vectors on reparse and does not reuse a different model profile", async () => {
+    await parseAndIndex();
+    const retrieval = semantic();
+    await retrieval.embedDocument(item.document_id);
+    expect((await semantic(undefined, { AI_EMBEDDING_MODEL: "different-embed" }).status(item.company_id)).embedded).toBe(0);
+    await source("Cobalt demand rose.");
+    await parseAndIndex();
+    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(0);
+    await retrieval.embedDocument(item.document_id);
+    expect((await retrieval.status(item.company_id)).embedded).toBe(1);
+  });
+
+  it("does not persist an in-flight embedding against a retired chunk generation", async () => {
+    await parseAndIndex();
+    const old = await sql`SELECT id FROM chunks`;
+    let changed = false;
+    const retrieval = semantic({ embed: async (request) => {
+      if (!changed) { changed = true; await source("Replacement evidence."); await parseAndIndex(); }
+      return { model: request.model, embeddings: request.inputs.map(() => [1, 0]) };
+    } });
+    await retrieval.embedDocument(item.document_id);
+    expect(await sql`SELECT * FROM chunk_embeddings WHERE chunk_id = ${old[0].id}`).toHaveLength(0);
+    expect((await retrieval.status(item.company_id)).embedded).toBe(1);
+  });
+
+  it("queues semantic backfill once and requires an explicit retry after terminal failure", async () => {
+    await parseAndIndex();
+    const retrieval = semantic();
+    const results = await Promise.all([retrieval.queue(item.company_id), retrieval.queue(item.company_id)]);
+    expect(results.reduce((sum, result) => sum + result.queued, 0)).toBe(1);
+    await sql`UPDATE work_items SET status = 'failed' WHERE work_type = 'embed_document'`;
+    expect((await retrieval.status(item.company_id)).failed).toBe(1);
+    expect((await retrieval.queue(item.company_id)).queued).toBe(0);
+    expect((await retrieval.queue(item.company_id, true)).queued).toBe(1);
+    expect(await retrieval.status(item.company_id)).toMatchObject({ failed: 0, pending: 1 });
+  });
+
+  it("serves preserved sources in isolation and rejects stale reader hashes", async () => {
+    await source('Orchard<script>window.bad = true</script><img src="https://example.com/tracker"><form><input></form>');
+    await parseAndIndex();
+    const original = await app.inject({ url: `/api/v1/documents/${item.document_id}/source` });
+    expect(original.statusCode).toBe(200);
+    expect(original.headers["content-security-policy"]).toContain("default-src 'none'");
+    expect(original.body).not.toMatch(/<script|<img|<form|<input/);
+    const reader = await app.inject({ url: `/api/v1/filings/${item.filing_id}/parsed` });
+    expect(reader.json()).toMatchObject({ document: { parserVersion: expect.any(String), sourceHash: expect.any(String) }, sections: [{ end_offset: expect.any(Number) }] });
+    expect((await app.inject({ url: `/api/v1/filings/${item.filing_id}/parsed?textHash=retired` })).statusCode).toBe(409);
+    expect((await app.inject({ url: `/api/v1/documents/${item.document_id}/source?contentHash=retired` })).statusCode).toBe(409);
+  });
+
+  it("confirms existing identity locally and queues explicit refresh with lookback policy", async () => {
+    await sql`INSERT INTO company_ticker_aliases (company_id, ticker, source) VALUES (${item.company_id}, 'TEST', 'fixture')`;
+    await sql`UPDATE companies SET earliest_requested_filing_date = '2020-01-01' WHERE id = ${item.company_id}`;
+    const identity = await app.inject({ method: "POST", url: "/api/v1/companies/resolve", payload: { ticker: "test" } });
+    expect(identity.json()).toMatchObject({ company: { id: item.company_id, name: "Fixture Inc", existed: true } });
+    expect((await app.inject({ method: "POST", url: "/api/v1/companies", payload: { ticker: "TEST", startDate: "2020-01-01", confirmedCik: 999 } })).statusCode).toBe(409);
+    const refreshed = await app.inject({ method: "POST", url: "/api/v1/companies", payload: { ticker: "TEST", startDate: "2020-01-01", confirmedCik: 123, refresh: true, lookback: "custom" } });
+    expect(refreshed.statusCode).toBe(202);
+    expect((await sql`SELECT requested_lookback FROM companies WHERE id = ${item.company_id}`)[0].requested_lookback).toBe("custom");
+  });
+
+  it("does not add a new issuer until a completed identity preview is confirmed", async () => {
+    const preview = await app.inject({ method: "POST", url: "/api/v1/companies/resolve", payload: { ticker: "NEW" } });
+    expect(preview.statusCode).toBe(202);
+    expect(await sql`SELECT id FROM companies WHERE cik = 456`).toHaveLength(0);
+    await sql`UPDATE jobs SET status = 'complete',
+      progress = ${sql.json({ company: { id: null, cik: 456, ticker: "NEW", name: "New Issuer", existed: false } })}
+      WHERE id = ${preview.json().jobId}`;
+    const confirmed = await app.inject({ method: "POST", url: "/api/v1/companies",
+      payload: { ticker: "NEW", startDate: "1900-01-01", confirmedCik: 456, lookback: "all" } });
+    expect(confirmed.statusCode).toBe(202);
+    expect(confirmed.json().companyId).toBeTruthy();
+    expect(await sql`SELECT id FROM companies WHERE cik = 456 AND requested_lookback = 'all'`).toHaveLength(1);
   });
 });

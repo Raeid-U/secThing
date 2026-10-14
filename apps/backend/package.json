@@ -11,7 +11,11 @@
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@secthing/platform": "*",
-    "fastify": "^5.2.1"
+    "fastify": "^5.2.1",
+    "sanitize-html": "^2.18.1"
+  },
+  "devDependencies": {
+    "@types/sanitize-html": "^2.16.2"
   }
 }
 

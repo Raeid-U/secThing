@@ -5,5 +5,7 @@ dist/
 .env
 data/
 coverage/
+test-results/
+playwright-report/
 .DS_Store
 docs/dev_log/dev_context*

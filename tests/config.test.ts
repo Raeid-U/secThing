@@ -38,4 +38,15 @@ describe("loadConfig", () => {
       AI_EMBEDDING_DIMENSION: "",
     })).toMatchObject({ aiMode: "disabled", aiChatModel: undefined, aiEmbeddingDimension: undefined });
   });
+
+  it("enables embeddings without requiring a chat endpoint", () => {
+    expect(loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "local",
+      AI_EMBEDDING_PROVIDER: "ollama", AI_EMBEDDING_BASE_URL: "http://ollama:11434", AI_EMBEDDING_MODEL: "nomic-embed-text" }))
+      .toMatchObject({ aiMode: "local", aiChatBaseUrl: undefined, aiEmbeddingModel: "nomic-embed-text" });
+  });
+
+  it("requires explicit permission to leave local-only mode", () => {
+    expect(() => loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "external",
+      AI_EMBEDDING_BASE_URL: "https://external.example" })).toThrow("Disable LOCAL_ONLY");
+  });
 });

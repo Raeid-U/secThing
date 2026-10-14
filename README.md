@@ -8,15 +8,21 @@ Self-hosted, evidence-first SEC filing research workbench. See [docs/BRD-PRD.md]
 2. Run `docker compose up --build`.
 3. Open `http://localhost:3000`.
 
+Compose first runs a single `dependencies` initialization service to install the lockfile into the shared `node-modules` volume. Backend, worker, and frontend wait for it to succeed, so added packages are available even when an older dependency volume already exists. Rebuild/restart with `docker compose up --build -d` after pulling changes; database and model volumes remain intact.
+
 The backend is available on `http://localhost:8080`:
 
 - `GET /health` checks that the process is alive.
 - `GET /ready` checks PostgreSQL, current migrations, and the writable data directory.
 - `GET /api/v1/system/capabilities` exposes explicit capability flags.
 
-The current evidence pipeline accepts a ticker and a filing start date, resolves the company by CIK, catalogues filings, preserves supported primary sources, parses normalized text, and indexes section-aware chunks. The records UI exposes the filing ledger and normalized reader. Company-scoped full-text search is currently available through the API; search UI, semantic retrieval, financial facts, and cited AI answers remain pending.
+The records workspace provides guided company intake, filterable filings, company-scoped keyword/meaning/combined search, and a fixed frame with independently scrolling original-source and extracted-text panes. Selecting a result opens its exact extracted passage. Sources currently supported by acquisition and parsing are HTML/text; the original view renders an isolated copy of the preserved source with scripts and external assets blocked. Financial facts and cited AI answers remain pending.
 
-The worker backfills missing or outdated chunk indexes when it starts. To retry indexing for a company without restarting it, call `POST /api/v1/companies/:companyId/search/reindex`. The response contains `queued` and `jobIds`; already indexed or actively processing documents are skipped. Search is available at `GET /api/v1/companies/:companyId/search?q=...`, with optional `formType`, `sectionType`, `filedAfter`, `filedBefore`, and `limit`.
+The worker backfills missing or outdated chunk indexes when it starts. Use **Update index** in the workspace or `POST /api/v1/companies/:companyId/search/reindex` to queue missing indexes and retry failed embedding jobs. The response contains `queued`, `jobIds`, and optionally `embeddingsQueued`; already indexed or actively processing documents are skipped. Search is available at `GET /api/v1/companies/:companyId/search?q=...`, with optional `mode=full_text|semantic|hybrid`, `formType`, `sectionType`, `filedAfter`, `filedBefore`, and `limit`.
+
+Meaning search requires `AI_MODE=local`, `AI_EMBEDDING_PROVIDER=ollama`, `AI_EMBEDDING_BASE_URL`, and `AI_EMBEDDING_MODEL`. It does not require a chat model. The worker embeds passages in batches; the workspace shows how many are ready. Combined search falls back explicitly to keyword search when meaning retrieval is unavailable. Optional `AI_EMBEDDING_DIMENSION` enforces the expected vector size; otherwise the first valid response establishes it. Changing model, endpoint, dimension, or chunking profile creates a separate embedding profile. Use a new model tag when replacing model weights rather than overwriting an existing tag.
+
+Vectors use exact cosine retrieval in PostgreSQL for the initial local corpus. An approximate vector index can follow measured performance needs.
 
 ## Local AI runtime (Ollama)
 
@@ -32,12 +38,10 @@ AI_EMBEDDING_BASE_URL=http://ollama:11434
 AI_EMBEDDING_MODEL=nomic-embed-text
 ```
 
-For CPU-only use, start the profile and download the selected models into the persistent `ollama-data` volume:
+For CPU-only use, start the profile:
 
 ```bash
 docker compose --profile ollama-cpu up --build -d
-docker compose exec ollama ollama pull qwen2.5:3b
-docker compose exec ollama ollama pull nomic-embed-text
 ```
 
 For the initial Windows 11 + Docker Desktop/WSL2 + NVIDIA path, install a current NVIDIA Windows driver and enable Docker GPU support, then use:
@@ -45,6 +49,10 @@ For the initial Windows 11 + Docker Desktop/WSL2 + NVIDIA path, install a curren
 ```bash
 docker compose -f compose.yaml -f compose.nvidia.yaml --profile ollama-nvidia up --build -d
 ```
+
+Both profiles automatically provision the `AI_CHAT_MODEL` and `AI_EMBEDDING_MODEL` names from `.env`. The `ollama-models` initialization service waits for Ollama, skips models already present, and downloads missing models into the existing `ollama-data` volume. Worker startup waits for provisioning; the backend/UI can start while models download. Check progress with `docker compose logs -f ollama-models`. A failed pull stops worker startup with a visible error; correct the model setting/connectivity and rerun the same Compose command.
+
+Automatic pulls apply only to `AI_MODE=local`, provider `ollama`, and an endpoint of `http://ollama:11434` (an optional trailing slash is accepted). Blank model names and separately hosted runtimes are skipped. The AI-free base stack does not start Ollama or download models.
 
 The backend reports runtime/model status at `GET /api/v1/system/ai/status`. `POST /api/v1/system/ai/verify` makes a fixed local diagnostic chat call after the configured model is available. It does not send company evidence or persist generated content. AMD/ROCm, Intel/Arc, vLLM, and llama.cpp are intentionally deferred to future deployment adapters.
 
@@ -77,3 +85,5 @@ npm run dev:frontend
 ## Validation
 
 Run `npm test`, `npm run check`, and `npm run build`. PostgreSQL lifecycle integration tests require a disposable pgvector PostgreSQL instance; set `TEST_DATABASE_URL` when running `npm test` to enable them. These tests create and remove a unique schema and never use the application's `DATABASE_URL`. Without `TEST_DATABASE_URL`, the integration suite is skipped.
+
+For browser interaction tests, run `npx playwright install --with-deps chromium`, then `npm run test:browser`. The suite starts the frontend and supplies fixture API responses; it needs neither SEC access nor Ollama. Set `CHROMIUM_PATH` to use an existing Chromium binary.
