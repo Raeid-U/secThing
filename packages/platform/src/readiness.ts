@@ -50,9 +50,12 @@ export function capabilities(config: PlatformConfig) {
   return {
     companyIngestion: Boolean(config.secUserAgent),
     filingSearch: true,
+    filingSearchUi: false,
+    semanticSearch: false,
     ragChat: false,
     aiMode: config.aiMode,
     localOnly: config.localOnly,
     phase: 6,
+    phaseStatus: "in_progress",
   };
 }

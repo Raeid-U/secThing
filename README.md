@@ -14,7 +14,9 @@ The backend is available on `http://localhost:8080`:
 - `GET /ready` checks PostgreSQL, current migrations, and the writable data directory.
 - `GET /api/v1/system/capabilities` exposes explicit capability flags.
 
-The current metadata slice accepts a ticker and a filing start date, resolves the company by CIK, stores SEC identity/profile metadata, and catalogues filings without duplicating existing accessions. Filing-document download, parsing, search, and AI remain later phases.
+The current evidence pipeline accepts a ticker and a filing start date, resolves the company by CIK, catalogues filings, preserves supported primary sources, parses normalized text, and indexes section-aware chunks. The records UI exposes the filing ledger and normalized reader. Company-scoped full-text search is currently available through the API; search UI, semantic retrieval, financial facts, and cited AI answers remain pending.
+
+The worker backfills missing or outdated chunk indexes when it starts. To retry indexing for a company without restarting it, call `POST /api/v1/companies/:companyId/search/reindex`. The response contains `queued` and `jobIds`; already indexed or actively processing documents are skipped. Search is available at `GET /api/v1/companies/:companyId/search?q=...`, with optional `formType`, `sectionType`, `filedAfter`, `filedBefore`, and `limit`.
 
 ## Local AI runtime (Ollama)
 
@@ -70,4 +72,8 @@ npm run dev:worker
 npm run dev:frontend
 ```
 
-`data/` is bind-mounted in Compose for SEC source and artifact storage introduced in later phases. PostgreSQL uses the `postgres-data` named volume.
+`data/` is bind-mounted in Compose for preserved SEC sources and normalized text. PostgreSQL uses the `postgres-data` named volume.
+
+## Validation
+
+Run `npm test`, `npm run check`, and `npm run build`. PostgreSQL lifecycle integration tests require a disposable pgvector PostgreSQL instance; set `TEST_DATABASE_URL` when running `npm test` to enable them. These tests create and remove a unique schema and never use the application's `DATABASE_URL`. Without `TEST_DATABASE_URL`, the integration suite is skipped.

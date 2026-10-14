@@ -4,8 +4,10 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import {
   assessReadiness,
+  backfillSearchIndex,
   capabilities,
   chunkingProfileVersion,
+  filingParserVersion,
   connectDatabase,
   inspectAiRuntime,
   loadConfig,
@@ -143,8 +145,13 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       JOIN filings ON filings.id = chunks.filing_id
       JOIN filing_documents ON filing_documents.id = chunks.document_id
       JOIN filing_sections ON filing_sections.id = chunks.section_id
+      JOIN normalized_documents ON normalized_documents.id = chunks.normalized_document_id
       WHERE chunks.company_id = ${params.data.companyId}
         AND chunks.chunk_profile_version = ${chunkingProfileVersion}
+        AND normalized_documents.status = 'parsed'
+        AND normalized_documents.parser_version = ${filingParserVersion}
+        AND chunks.normalized_text_hash = normalized_documents.text_hash
+        AND normalized_documents.source_content_hash = filing_documents.content_hash
         AND chunks.search_vector @@ websearch_to_tsquery('english', ${query.data.q})
         AND (${query.data.formType ?? null}::text IS NULL OR filings.form_type = ${query.data.formType ?? null})
         AND (${query.data.sectionType ?? null}::text IS NULL OR filing_sections.section_type = ${query.data.sectionType ?? null})
@@ -154,6 +161,15 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       LIMIT ${query.data.limit}
     `;
     return { query: query.data.q, mode: "full_text" as const, results };
+  });
+
+  app.post("/api/v1/companies/:companyId/search/reindex", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    if (!id.success) return reply.code(400).send({ error: "Company id must be a positive integer." });
+    const company = await sql`SELECT id FROM companies WHERE id = ${id.data}`;
+    if (!company[0]) return reply.code(404).send({ error: "Company not found." });
+    const result = await backfillSearchIndex(sql, { companyId: id.data });
+    return reply.code(result.queued > 0 ? 202 : 200).send(result);
   });
 
   app.post("/api/v1/filings/:filingId/source/acquire", async (request, reply) => {
@@ -225,30 +241,9 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     `;
     const document = documents[0];
     if (!document) return reply.code(409).send({ error: "A parsed filing is required before chunking." });
-    const active = await sql<{ id: number }[]>`
-      SELECT id FROM work_items
-      WHERE document_id = ${document.document_id} AND work_type = 'chunk_document' AND status IN ('pending', 'running')
-      LIMIT 1
-    `;
-    if (active[0]) return reply.code(409).send({ error: "Chunking is already queued for this filing." });
-    const existing = await sql<{ id: number }[]>`
-      SELECT id FROM chunks
-      WHERE normalized_document_id = ${document.normalized_document_id}
-        AND normalized_text_hash = ${document.text_hash}
-        AND chunk_profile_version = ${chunkingProfileVersion}
-      LIMIT 1
-    `;
-    if (existing[0]) return reply.code(409).send({ error: "This parsed filing is already indexed with the current chunking profile." });
-    const jobs = await sql<{ id: number }[]>`
-      INSERT INTO jobs (job_type, company_id, status, progress)
-      VALUES ('filing_chunking', ${document.company_id}, 'running', ${sql.json({ chunking: { status: 'queued', queued: 1, complete: 0, failed: 0 } })})
-      RETURNING id
-    `;
-    await sql`
-      INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
-      VALUES (${jobs[0].id}, 'chunk_document', ${document.company_id}, ${id.data}, ${document.document_id}, '{}'::jsonb)
-    `;
-    return reply.code(202).send({ jobId: jobs[0].id, message: "Search indexing queued for the parsed filing." });
+    const result = await backfillSearchIndex(sql, { filingId: id.data });
+    if (result.queued === 0) return reply.code(409).send({ error: "This filing is already indexed or has active parse/index work." });
+    return reply.code(202).send({ jobId: result.jobIds[0], message: "Search indexing queued for the parsed filing." });
   });
 
   app.get("/api/v1/filings/:filingId/parsed", async (request, reply) => {
