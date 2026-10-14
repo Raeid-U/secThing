@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { OllamaClient, type EmbeddingProvider } from "./ai.js";
 import type { PlatformConfig } from "./config.js";
 import { chunkingProfileVersion } from "./chunking.js";
@@ -176,7 +176,7 @@ export class Retrieval {
     return response.embeddings;
   }
 
-  async embedDocument(documentId: number, profileKey?: string) {
+  async embedDocument(documentId: number, profileKey?: string, assertOwnership?: (tx: TransactionSql) => Promise<void>) {
     const settings = embeddingSettings(this.config);
     if (!settings || (profileKey && profileKey !== settings.key)) return;
     const profile = await this.profile();
@@ -199,6 +199,7 @@ export class Retrieval {
         profile,
       );
       await this.sql.begin(async (tx) => {
+        await assertOwnership?.(tx);
         await tx`SELECT id FROM filing_documents WHERE id = ${documentId} FOR UPDATE`;
         for (const [index, chunk] of chunks.entries()) {
           await tx`INSERT INTO chunk_embeddings (chunk_id, profile_id, chunk_hash, embedding)

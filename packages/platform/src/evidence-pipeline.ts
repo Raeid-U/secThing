@@ -23,26 +23,33 @@ export async function backfillSearchIndex(sql: Sql, scope: { companyId?: number;
         AND (${scope.filingId ?? null}::bigint IS NULL OR filings.id = ${scope.filingId ?? null})
       ORDER BY filing_documents.id FOR UPDATE OF filing_documents
     `;
-    const candidates = await transaction<{ document_id: number; filing_id: number; company_id: number }[]>`
-      SELECT filing_documents.id AS document_id, filings.id AS filing_id, filings.company_id
+    const candidates = await transaction<{ document_id: number; filing_id: number; company_id: number; needs_parse: boolean }[]>`
+      SELECT DISTINCT ON (filings.company_id, filing_documents.id)
+        filing_documents.id AS document_id, filings.id AS filing_id, filings.company_id
+        , normalized_documents.parser_version <> ${filingParserVersion} AS needs_parse
       FROM filing_documents
       JOIN filings ON filings.id = filing_documents.filing_id
       JOIN normalized_documents ON normalized_documents.document_id = filing_documents.id
       WHERE normalized_documents.status = 'parsed'
-        AND normalized_documents.parser_version = ${filingParserVersion}
         AND normalized_documents.source_content_hash = filing_documents.content_hash
+        AND (normalized_documents.parser_version = ${filingParserVersion} OR NOT EXISTS (
+          SELECT 1 FROM normalized_documents current_parse
+          WHERE current_parse.document_id = filing_documents.id AND current_parse.status = 'parsed'
+            AND current_parse.parser_version = ${filingParserVersion}
+            AND current_parse.source_content_hash = filing_documents.content_hash
+        ))
         AND (${scope.companyId ?? null}::bigint IS NULL OR filings.company_id = ${scope.companyId ?? null})
         AND (${scope.filingId ?? null}::bigint IS NULL OR filings.id = ${scope.filingId ?? null})
-        AND NOT EXISTS (
+        AND (normalized_documents.parser_version <> ${filingParserVersion} OR NOT EXISTS (
           SELECT 1 FROM chunks WHERE chunks.normalized_document_id = normalized_documents.id
             AND chunks.chunk_profile_version = ${chunkingProfileVersion}
             AND chunks.normalized_text_hash = normalized_documents.text_hash
-        )
+        ))
         AND NOT EXISTS (
           SELECT 1 FROM work_items WHERE work_items.document_id = filing_documents.id
             AND work_type IN ('parse_filing_source', 'chunk_document') AND status IN ('pending', 'running')
         )
-      ORDER BY filings.company_id, filing_documents.id
+      ORDER BY filings.company_id, filing_documents.id, normalized_documents.parsed_at DESC, normalized_documents.id DESC
     `;
     const jobIds: number[] = [];
     const companies = [...new Set(candidates.map((candidate) => candidate.company_id))];
@@ -51,19 +58,27 @@ export async function backfillSearchIndex(sql: Sql, scope: { companyId?: number;
       const jobs = await transaction<{ id: number }[]>`
         INSERT INTO jobs (job_type, company_id, status, progress)
         VALUES ('search_index_backfill', ${companyId}, 'running',
-          ${transaction.json({ chunking: { status: 'queued', queued: documents.length, complete: 0, failed: 0 } })})
+          ${transaction.json({
+            parsing: { status: documents.some((document) => document.needs_parse) ? 'queued' : 'complete', queued: documents.filter((document) => document.needs_parse).length, complete: 0, failed: 0 },
+            chunking: { status: 'queued', queued: documents.filter((document) => !document.needs_parse).length, complete: 0, failed: 0 },
+          })})
         RETURNING id
       `;
       jobIds.push(jobs[0].id);
       for (const document of documents) {
-        await queueChunking(transaction, jobs[0].id, companyId, document.filing_id, document.document_id);
+        if (document.needs_parse) {
+          await transaction`INSERT INTO work_items (job_id, work_type, company_id, filing_id, document_id, input)
+            VALUES (${jobs[0].id}, 'parse_filing_source', ${companyId}, ${document.filing_id}, ${document.document_id}, '{}'::jsonb)`;
+        } else {
+          await queueChunking(transaction, jobs[0].id, companyId, document.filing_id, document.document_id);
+        }
       }
     }
     return { queued: candidates.length, jobIds };
   });
 }
 
-export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "dataDir">, item: EvidenceWork): Promise<void> {
+export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "dataDir">, item: EvidenceWork, assertOwnership?: (tx: TransactionSql) => Promise<void>): Promise<void> {
   if (!item.document_id || !item.filing_id) throw new Error("Parse work item is missing a document or filing.");
   const documents = await sql<ParseDocument[]>`
     SELECT filing_documents.id, filing_documents.filing_id, filings.form_type, filing_documents.local_path,
@@ -75,6 +90,7 @@ export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "
   if (!document?.local_path || !document.content_hash) throw new Error("Downloaded filing source is missing its local path or content hash.");
   const parsed = await parser.parse({ sourcePath: document.local_path, contentType: document.content_type, formType: document.form_type, dataDir: config.dataDir });
   await sql.begin(async (transaction) => {
+    await assertOwnership?.(transaction);
     await transaction`SELECT id FROM filing_documents WHERE id = ${document.id} FOR UPDATE`;
     const current = await transaction<{ content_hash: string }[]>`SELECT content_hash FROM filing_documents WHERE id = ${document.id}`;
     if (current[0].content_hash !== document.content_hash) throw new Error("Source changed during parsing; retry with the current source.");
@@ -144,9 +160,10 @@ async function queueChunking(sql: TransactionSql, jobId: number, companyId: numb
   `;
 }
 
-export async function chunkDocument(sql: Sql, item: EvidenceWork): Promise<void> {
+export async function chunkDocument(sql: Sql, item: EvidenceWork, assertOwnership?: (tx: TransactionSql) => Promise<void>): Promise<void> {
   if (!item.document_id || !item.filing_id || !item.company_id) throw new Error("Chunking work item is missing its company, filing, or document.");
   await sql.begin(async (transaction) => {
+    await assertOwnership?.(transaction);
     await transaction`SELECT id FROM filing_documents WHERE id = ${item.document_id} FOR UPDATE`;
     const documents = await transaction<ChunkDocument[]>`
       SELECT filing_documents.id AS document_id, filing_documents.filing_id, filings.company_id,

@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { buildServer } from "../apps/backend/src/server.js";
+import { post } from "../apps/frontend/app/research/types.js";
 
 const app = buildServer({
   databaseUrl: "postgresql://user:pass@localhost:5432/secthing",
@@ -31,7 +32,9 @@ describe("backend health", () => {
   });
 
   it("does not run AI verification while AI is disabled", async () => {
-    const response = await app.inject({ method: "POST", url: "/api/v1/system/ai/verify" });
+    const init = post();
+    const response = await app.inject({ method: "POST", url: "/api/v1/system/ai/verify",
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string | undefined });
     expect(response.statusCode).toBe(409);
   });
 });

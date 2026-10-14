@@ -1,6 +1,10 @@
+import type { TransactionSql } from "postgres";
 import { randomUUID } from "node:crypto";
 import {
   Retrieval,
+  WorkQueue,
+  LeaseLostError,
+  type ClaimedWork,
   backfillSearchIndex,
   chunkDocument,
   parseFilingSource,
@@ -32,23 +36,8 @@ const sec = new SecClient({
 });
 const retrieval = new Retrieval(sql, config);
 
-type WorkItem = {
-  id: number;
-  job_id: number;
-  work_type:
-    | "resolve_company"
-    | "resolve_company_preview"
-    | "fetch_metadata"
-    | "acquire_filing_source"
-    | "parse_filing_source"
-    | "chunk_document"
-    | "embed_document";
-  company_id: number | null;
-  filing_id: number | null;
-  document_id: number | null;
-  attempt_count: number;
-  input: { ticker?: string; startDate?: string; profileKey?: string };
-};
+type WorkItem = ClaimedWork;
+const queue = new WorkQueue(sql, workerId);
 type Company = { id: number; cik: number };
 type SourceFiling = {
   id: number;
@@ -58,7 +47,7 @@ type SourceFiling = {
   primary_document: string | null;
 };
 
-async function storeResponse(response: {
+async function storeResponse(sql: TransactionSql, response: {
   url: string;
   status: number;
   contentType: string | null;
@@ -72,23 +61,8 @@ async function storeResponse(response: {
   `;
 }
 
-async function claimWork(): Promise<WorkItem | undefined> {
-  const claimed = await sql<WorkItem[]>`
-    UPDATE work_items
-    SET status = 'running', lease_owner = ${workerId}, lease_expires_at = now() + interval '5 minutes', attempt_count = attempt_count + 1, updated_at = now()
-    WHERE id = (
-      SELECT id FROM work_items
-      WHERE status = 'pending' AND next_run_at <= now()
-      ORDER BY id
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    )
-    RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, input
-  `;
-  return claimed[0];
-}
-
 async function upsertCompany(
+  sql: TransactionSql,
   cik: number,
   name: string,
   ticker: string,
@@ -117,30 +91,33 @@ async function resolveCompany(item: WorkItem): Promise<void> {
   if (!ticker || !startDate)
     throw new Error("Resolve work item is missing ticker or start date.");
   const { match, response } = await sec.resolveTicker(ticker);
-  await storeResponse(response);
-  if (item.work_type === "resolve_company_preview") {
-    const prior = await sql<Company[]>`SELECT id, cik FROM companies WHERE cik = ${match.cik}`;
-    await sql`UPDATE jobs SET company_id = ${prior[0]?.id ?? null}, status = 'complete',
-      progress = ${sql.json({ identity: "complete", company: { id: prior[0]?.id ?? null, cik: match.cik, name: match.title, ticker: match.ticker, existed: prior.length > 0 } })},
-      updated_at = now() WHERE id = ${item.job_id}`;
-    return;
-  }
-  const { company, existed } = await upsertCompany(match.cik, match.title, match.ticker);
-  await sql`UPDATE jobs SET company_id = ${company.id}, status = 'running', progress = ${sql.json({ identity: "complete", metadata: "queued", filings: { discovered: 0, total: 0 }, existingCompany: existed })}, updated_at = now() WHERE id = ${item.job_id}`;
-  await sql`
-    INSERT INTO work_items (job_id, work_type, company_id, input)
-    VALUES (${item.job_id}, 'fetch_metadata', ${company.id}, ${sql.json({ startDate })})
-  `;
+  await queue.transaction(item, async (sql) => {
+    await storeResponse(sql, response);
+    if (item.work_type === "resolve_company_preview") {
+      const prior = await sql<Company[]>`SELECT id, cik FROM companies WHERE cik = ${match.cik}`;
+      await sql`UPDATE jobs SET company_id = ${prior[0]?.id ?? null}, status = 'complete',
+        progress = ${sql.json({ identity: "complete", company: { id: prior[0]?.id ?? null, cik: match.cik, name: match.title, ticker: match.ticker, existed: prior.length > 0 } })},
+        updated_at = now() WHERE id = ${item.job_id}`;
+      return;
+    }
+    const { company, existed } = await upsertCompany(sql, match.cik, match.title, match.ticker);
+    await sql`UPDATE jobs SET company_id = ${company.id}, status = 'running', progress = ${sql.json({ identity: "complete", metadata: "queued", filings: { discovered: 0, total: 0 }, existingCompany: existed })}, updated_at = now() WHERE id = ${item.job_id}`;
+    await sql`
+      INSERT INTO work_items (job_id, work_type, company_id, input)
+      VALUES (${item.job_id}, 'fetch_metadata', ${company.id}, ${sql.json({ startDate })})
+    `;
+  });
 }
 
 async function persistSubmission(
+  sql: TransactionSql,
   company: Company,
   submission: CompanySubmission,
   startDate: string,
 ): Promise<{ discovered: number; total: number }> {
   const today = new Date().toISOString().slice(0, 10);
   for (const response of submission.cachedResponses)
-    await storeResponse(response);
+    await storeResponse(sql, response);
   await sql`
     UPDATE companies
     SET legal_name = ${submission.name}, sic = ${submission.sic ?? null}, sic_description = ${submission.sicDescription ?? null}, entity_type = ${submission.entityType ?? null},
@@ -192,18 +169,21 @@ async function fetchMetadata(item: WorkItem): Promise<void> {
   const company = companies[0];
   if (!company) throw new Error("Company no longer exists.");
   const submission = await sec.fetchCompanySubmission(company.cik);
-  const counts = await persistSubmission(company, submission, startDate);
-  const queued = await queueSourceAcquisition(item.job_id, company.id);
-  await sql`
-    UPDATE jobs
-    SET status = ${queued > 0 ? "running" : "complete"},
-        progress = ${sql.json({ identity: "complete", metadata: "complete", filings: { discovered: counts.discovered, total: counts.total }, sourceAcquisition: { status: queued > 0 ? "queued" : "not_applicable", queued, complete: 0, failed: 0 }, parsing: "not_started", chunking: "not_started" })},
-        updated_at = now()
-    WHERE id = ${item.job_id}
-  `;
+  await queue.transaction(item, async (sql) => {
+    const counts = await persistSubmission(sql, company, submission, startDate);
+    const queued = await queueSourceAcquisition(sql, item.job_id, company.id);
+    await sql`
+      UPDATE jobs
+      SET status = ${queued > 0 ? "running" : "complete"},
+          progress = ${sql.json({ identity: "complete", metadata: "complete", filings: { discovered: counts.discovered, total: counts.total }, sourceAcquisition: { status: queued > 0 ? "queued" : "not_applicable", queued, complete: 0, failed: 0 }, parsing: "not_started", chunking: "not_started" })},
+          updated_at = now()
+      WHERE id = ${item.job_id}
+    `;
+  });
 }
 
 async function queueSourceAcquisition(
+  sql: TransactionSql,
   jobId: number,
   companyId: number,
 ): Promise<number> {
@@ -244,21 +224,24 @@ async function acquireFilingSource(item: WorkItem): Promise<void> {
     formType: filing.form_type,
     primaryDocument: filing.primary_document ?? undefined,
   });
-  await storeResponse(document.indexResponse);
-  const documents = await sql<{ id: number }[]>`
-    INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size, status, fetched_at)
-    VALUES (${filing.id}, ${document.documentName}, ${document.documentType}, ${document.url}, ${document.bodyPath}, ${document.contentType}, ${document.contentHash}, ${document.byteSize}, 'downloaded', now())
-    ON CONFLICT (filing_id, document_name) DO UPDATE SET
-      document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
-      content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
-      status = 'downloaded', last_error = NULL, fetched_at = now(), updated_at = now()
-    RETURNING id
-  `;
-  await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
-  await queueParsing(item.job_id, item.company_id, filing.id, documents[0].id);
+  await queue.transaction(item, async (sql) => {
+    await storeResponse(sql, document.indexResponse);
+    const documents = await sql<{ id: number }[]>`
+      INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size, status, fetched_at)
+      VALUES (${filing.id}, ${document.documentName}, ${document.documentType}, ${document.url}, ${document.bodyPath}, ${document.contentType}, ${document.contentHash}, ${document.byteSize}, 'downloaded', now())
+      ON CONFLICT (filing_id, document_name) DO UPDATE SET
+        document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
+        content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
+        status = 'downloaded', last_error = NULL, fetched_at = now(), updated_at = now()
+      RETURNING id
+    `;
+    await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
+    await queueParsing(sql, item.job_id, item.company_id, filing.id, documents[0].id);
+  });
 }
 
 async function queueParsing(
+  sql: TransactionSql,
   jobId: number,
   companyId: number | null,
   filingId: number,
@@ -360,20 +343,27 @@ async function refreshPipelineProgress(jobId: number): Promise<void> {
 }
 
 async function completeWork(item: WorkItem): Promise<void> {
-  await sql`UPDATE work_items SET status = 'complete', lease_owner = null, lease_expires_at = null, updated_at = now() WHERE id = ${item.id}`;
+  await queue.transaction(item, async (sql) => {
+    await sql`UPDATE work_items SET status = 'complete', lease_owner = null, lease_expires_at = null, updated_at = now() WHERE id = ${item.id}`;
+    if (item.work_type === "embed_document") {
+      await sql`UPDATE jobs SET status = 'complete', progress = '{"embeddings":"complete"}', updated_at = now() WHERE id = ${item.job_id}`;
+    }
+  });
 }
 
 async function failWork(item: WorkItem, error: unknown): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown worker failure.";
   const retry = item.attempt_count < 3;
-  await sql`
-    UPDATE work_items
-    SET status = ${retry ? "pending" : "failed"}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
-        error_code = ${item.work_type === "embed_document" ? "embedding_failed" : item.work_type === "acquire_filing_source" ? "source_acquisition_failed" : item.work_type === "parse_filing_source" ? "filing_parse_failed" : item.work_type === "chunk_document" ? "filing_chunking_failed" : "sec_ingestion_failed"}, error_message = ${message}, updated_at = now()
-    WHERE id = ${item.id}
-  `;
-  await sql`UPDATE jobs SET status = ${retry ? "running" : "partial"}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
+  await queue.transaction(item, async (sql) => {
+    await sql`
+      UPDATE work_items
+      SET status = ${retry ? "pending" : "failed"}, next_run_at = now() + interval '30 seconds', lease_owner = null, lease_expires_at = null,
+          error_code = ${item.work_type === "embed_document" ? "embedding_failed" : item.work_type === "acquire_filing_source" ? "source_acquisition_failed" : item.work_type === "parse_filing_source" ? "filing_parse_failed" : item.work_type === "chunk_document" ? "filing_chunking_failed" : "sec_ingestion_failed"}, error_message = ${message}, updated_at = now()
+      WHERE id = ${item.id}
+    `;
+    await sql`UPDATE jobs SET status = ${retry ? "running" : "partial"}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
+  });
   console.error(
     JSON.stringify({
       event: "worker.work_failed",
@@ -384,7 +374,7 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
   );
 }
 
-await sql`UPDATE work_items SET status = 'pending', lease_owner = null, lease_expires_at = null, updated_at = now() WHERE status = 'running' AND lease_expires_at < now()`;
+await queue.recoverExpired();
 
 const backfill = await backfillSearchIndex(sql);
 console.info(JSON.stringify({ event: "worker.search_backfill", ...backfill }));
@@ -396,7 +386,7 @@ const idleLoop = setInterval(() => {
   if (polling) return;
   polling = true;
   void (async () => {
-    const item = await claimWork();
+    const item = await queue.claim();
     if (!item) {
       if (Date.now() - lastEmbeddingScan > 30_000) {
         lastEmbeddingScan = Date.now();
@@ -404,6 +394,15 @@ const idleLoop = setInterval(() => {
       }
       return;
     }
+    let renewing = false;
+    const heartbeat = setInterval(() => {
+      if (renewing) return;
+      renewing = true;
+      void queue.renew(item).catch((error: unknown) => {
+        console.error(JSON.stringify({ event: "worker.heartbeat_failed", workItemId: item.id, message: String(error) }));
+      }).finally(() => { renewing = false; });
+    }, 30_000);
+    const assertOwnership = (tx: TransactionSql) => queue.assertOwnership(tx, item);
     try {
       if (
         item.work_type === "resolve_company" ||
@@ -414,15 +413,14 @@ const idleLoop = setInterval(() => {
       else if (item.work_type === "acquire_filing_source")
         await acquireFilingSource(item);
       else if (item.work_type === "parse_filing_source")
-        await parseFilingSource(sql, config, item);
+        await parseFilingSource(sql, config, item, assertOwnership);
       else if (item.work_type === "chunk_document") {
-        await chunkDocument(sql, item);
-        await retrieval.queue(item.company_id ?? undefined);
+        await chunkDocument(sql, item, assertOwnership);
       } else {
-        await retrieval.embedDocument(item.document_id!, item.input.profileKey);
-        await sql`UPDATE jobs SET status = 'complete', progress = '{"embeddings":"complete"}', updated_at = now() WHERE id = ${item.job_id}`;
+        await retrieval.embedDocument(item.document_id!, item.input.profileKey, assertOwnership);
       }
       await completeWork(item);
+      if (item.work_type === "chunk_document") await retrieval.queue(item.company_id ?? undefined);
       if (
         item.work_type === "acquire_filing_source" ||
         item.work_type === "parse_filing_source" ||
@@ -447,13 +445,19 @@ const idleLoop = setInterval(() => {
           stack: error instanceof Error ? error.stack : undefined,
         }),
       );
-      await failWork(item, error);
+      if (!(error instanceof LeaseLostError)) {
+        await failWork(item, error).catch((failure: unknown) => {
+          if (!(failure instanceof LeaseLostError)) throw failure;
+        });
+      }
       if (
         item.work_type === "acquire_filing_source" ||
         item.work_type === "parse_filing_source" ||
         item.work_type === "chunk_document"
       )
         await refreshPipelineProgress(item.job_id);
+    } finally {
+      clearInterval(heartbeat);
     }
   })()
     .catch((error: unknown) =>
@@ -469,8 +473,17 @@ const idleLoop = setInterval(() => {
       polling = false;
     });
 }, 500);
+let recovering = false;
+const recoveryLoop = setInterval(() => {
+  if (recovering) return;
+  recovering = true;
+  void queue.recoverExpired().catch((error: unknown) => {
+    console.error(JSON.stringify({ event: "worker.recovery_failed", message: String(error) }));
+  }).finally(() => { recovering = false; });
+}, 10_000);
 const stop = () => {
   clearInterval(idleLoop);
+  clearInterval(recoveryLoop);
   void sql.end({ timeout: 5 }).finally(() => process.exit(0));
 };
 process.once("SIGINT", stop);

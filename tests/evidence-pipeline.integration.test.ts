@@ -3,15 +3,16 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, loadConfig, parseFilingSource, Retrieval } from "@secthing/platform";
+import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, loadConfig, parseFilingSource, Retrieval, WorkQueue, LeaseLostError } from "@secthing/platform";
 import { buildServer } from "../apps/backend/src/server.js";
+import { post } from "../apps/frontend/app/research/types.js";
 
 // Use a disposable PostgreSQL instance. Never fall back to the application's DATABASE_URL.
 const databaseUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
   const schema = `evidence_test_${randomUUID().replaceAll("-", "")}`;
   const scopedUrl = new URL(databaseUrl ?? "postgres://localhost/unused");
-  scopedUrl.searchParams.set("search_path", schema);
+  scopedUrl.searchParams.set("search_path", `${schema},public`);
   const admin = connectDatabase(databaseUrl ?? scopedUrl.toString());
   const sql = connectDatabase(scopedUrl.toString());
   let dataDir: string;
@@ -19,6 +20,10 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
   let app: ReturnType<typeof buildServer>;
 
   beforeAll(async () => {
+    await admin.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(289462260)`;
+      await tx`CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public`;
+    });
     await admin.unsafe(`CREATE SCHEMA "${schema}"`);
     await applyMigrations(sql);
     dataDir = await mkdtemp(join(tmpdir(), "secthing-evidence-test-"));
@@ -82,6 +87,39 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'orchard')`).toHaveLength(0);
     expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'cobalt')`).toHaveLength(1);
     expect(await sql`SELECT id FROM source_spans WHERE span_kind = 'chunk'`).toHaveLength(1);
+  });
+
+  it("indexes preamble evidence and quarterly sections with exact source offsets", async () => {
+    const content = "Coverword issuer introduction.\nPART I — FINANCIAL INFORMATION\nItem 1. Financial Statements\nQuarterly accounts.\nItem 2. Management Discussion\nLiquidity outlook.\nPART II — OTHER INFORMATION\nItem 1. Legal Proceedings\nCourtword dispute.";
+    const path = join(dataDir, "quarterly.txt");
+    await writeFile(path, content);
+    await sql`UPDATE filings SET form_type = '10-Q' WHERE id = ${item.filing_id}`;
+    await sql`UPDATE filing_documents SET local_path = ${path}, content_type = 'text/plain',
+      content_hash = ${createHash("sha256").update(content).digest("hex")} WHERE id = ${item.document_id}`;
+    await parseAndIndex();
+    const cover = await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=coverword&sectionType=unknown` });
+    expect(cover.json().results).toHaveLength(1);
+    const legal = await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=courtword&sectionType=legal_proceedings` });
+    expect(legal.json().results).toHaveLength(1);
+    const chunks = await sql`SELECT chunk_text, start_offset, end_offset FROM chunks ORDER BY start_offset`;
+    for (const chunk of chunks) expect(content.slice(chunk.start_offset, chunk.end_offset)).toBe(chunk.chunk_text);
+    for (let index = 0; index < content.length; index++) {
+      if (/\S/.test(content[index])) expect(chunks.some((c) => c.start_offset <= index && c.end_offset > index)).toBe(true);
+    }
+  });
+
+  it("queues parser upgrades once and rebuilds the search index from preserved sources", async () => {
+    await parseAndIndex();
+    await sql`UPDATE normalized_documents SET parser_version = 'html-text-v1'`;
+    await sql`INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status)
+      SELECT document_id, 'older-parser', source_content_hash, normalized_text_path, text_hash, text_length, status FROM normalized_documents`;
+    expect((await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=orchard` })).json().results).toEqual([]);
+    const results = await Promise.all([backfillSearchIndex(sql), backfillSearchIndex(sql)]);
+    expect(results.reduce((sum, r) => sum + r.queued, 0)).toBe(1);
+    expect(await sql`SELECT id FROM work_items WHERE work_type = 'parse_filing_source' AND status = 'pending'`).toHaveLength(1);
+    await parseAndIndex();
+    expect((await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=orchard` })).json().results).toHaveLength(1);
+    expect((await backfillSearchIndex(sql)).queued).toBe(0);
   });
 
   it("supersedes prior parser versions and removes their evidence references", async () => {
@@ -156,7 +194,9 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await parseFilingSource(sql, { dataDir }, item);
     await sql`DELETE FROM work_items`;
     const url = `/api/v1/companies/${item.company_id}/search/reindex`;
-    expect((await app.inject({ method: "POST", url })).statusCode).toBe(202);
+    const init = post();
+    expect((await app.inject({ method: "POST", url,
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string | undefined })).statusCode).toBe(202);
     expect((await app.inject({ method: "POST", url })).json()).toEqual({ queued: 0, jobIds: [] });
     expect((await app.inject({ method: "POST", url: `/api/v1/filings/${item.filing_id}/chunk` })).statusCode).toBe(409);
   });
@@ -166,6 +206,35 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
       AI_EMBEDDING_PROVIDER: "ollama", AI_EMBEDDING_BASE_URL: "http://fixture", AI_EMBEDDING_MODEL: "fixture-embed", ...extra });
     return new Retrieval(sql, config, provider ?? { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) });
   }
+
+  it("rejects parse and chunk writes from an expired attempt without replacing evidence", async () => {
+    await parseAndIndex();
+    const before = await sql`SELECT id, chunk_text FROM chunks`;
+    await sql`INSERT INTO work_items (job_id, company_id, filing_id, document_id, work_type)
+      VALUES (${item.job_id}, ${item.company_id}, ${item.filing_id}, ${item.document_id}, 'parse_filing_source')`;
+    const queue = new WorkQueue(sql, 'retired-worker');
+    const work = (await queue.claim())!;
+    await sql`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = ${work.id}`;
+    const guard = (tx: Parameters<WorkQueue['assertOwnership']>[0]) => queue.assertOwnership(tx, work);
+    await expect(parseFilingSource(sql, { dataDir }, item, guard)).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(chunkDocument(sql, item, guard)).rejects.toBeInstanceOf(LeaseLostError);
+    expect(await sql`SELECT id, chunk_text FROM chunks`).toEqual(before);
+  });
+
+  it("rejects an in-flight embedding write after its work lease has been reclaimed", async () => {
+    await parseAndIndex();
+    await sql`INSERT INTO work_items (job_id, company_id, filing_id, document_id, work_type)
+      VALUES (${item.job_id}, ${item.company_id}, ${item.filing_id}, ${item.document_id}, 'embed_document')`;
+    const queue = new WorkQueue(sql, 'old-embed-worker');
+    const work = (await queue.claim())!;
+    const retrieval = semantic({ embed: async (request) => {
+      await sql`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = ${work.id}`;
+      await new WorkQueue(sql, 'replacement-worker').recoverExpired();
+      return { model: request.model, embeddings: request.inputs.map(() => [1, 0]) };
+    } });
+    await expect(retrieval.embedDocument(item.document_id, undefined, (tx) => queue.assertOwnership(tx, work))).rejects.toBeInstanceOf(LeaseLostError);
+    expect(await sql`SELECT chunk_id FROM chunk_embeddings`).toHaveLength(0);
+  });
 
   it("indexes vectors and supports semantic and fused search independently of chat", async () => {
     await parseAndIndex();

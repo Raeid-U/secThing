@@ -109,8 +109,12 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 export const post = (body?: unknown): RequestInit => ({
   method: "POST",
-  headers: { "content-type": "application/json" },
-  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  ...(body === undefined
+    ? {}
+    : {
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
 });
 export const dateLabel = (value: string) => value?.slice(0, 10) ?? "";
 export function filingState(filing: Filing) {

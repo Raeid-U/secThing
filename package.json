@@ -17,7 +17,8 @@
     "start:worker": "npm run start --workspace=@secthing/worker",
     "db:migrate": "tsx scripts/migrate.ts",
     "test": "vitest run",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "validate:retrieval": "tsx scripts/validate-retrieval.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",

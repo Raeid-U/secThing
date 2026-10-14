@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const filingParserVersion = "html-text-v1";
+export const filingParserVersion = "html-text-v2";
 
 export type ParsedFilingSection = {
   sectionType: string;
@@ -54,26 +54,62 @@ export function normalizeFilingText(source: string, contentType: string | null):
     .trim();
 }
 
-function sectionMatch(line: string, formType: string): { sectionType: string; label: string } | undefined {
+function sectionMatch(line: string, formType: string, part: string | undefined): { sectionType: string; label: string } | undefined {
   const item = line.match(/^item\s+(\d+(?:\.\d+)?[a-z]?)\s*[.:-]?\s*(.*)$/i);
   if (!item) return undefined;
   const itemNumber = item[1].toUpperCase();
   const label = item[2].trim() || `Item ${itemNumber}`;
   if (formType.startsWith("8-K")) return { sectionType: `item_${itemNumber.replace(".", "_")}`, label: `Item ${itemNumber} ${label}`.trim() };
+  if (formType.startsWith("10-Q")) {
+    const types: Record<string, Record<string, string>> = {
+      I: { "1": "financial_statements", "2": "management_discussion", "3": "market_risk", "4": "controls_and_procedures" },
+      II: { "1": "legal_proceedings", "1A": "risk_factors", "2": "unregistered_sales", "3": "defaults", "4": "mine_safety", "5": "other_information", "6": "exhibits" },
+    };
+    // A missing Part must not silently turn a quarterly item into an annual one.
+    const sectionType = part ? types[part]?.[itemNumber] : undefined;
+    return { sectionType: sectionType ?? "unknown", label: `${part ? `Part ${part} — ` : ""}Item ${itemNumber} ${label}`.trim() };
+  }
+  if (!formType.startsWith("10-K")) return { sectionType: "unknown", label: `Item ${itemNumber} ${label}`.trim() };
   const types: Record<string, string> = {
     "1": "business", "1A": "risk_factors", "3": "legal_proceedings", "7": "management_discussion", "7A": "market_risk", "8": "financial_statements", "9A": "controls_and_procedures", "10": "management", "15": "exhibits",
   };
   const sectionType = types[itemNumber];
-  return sectionType ? { sectionType, label: `Item ${itemNumber} ${label}`.trim() } : undefined;
+  return { sectionType: sectionType ?? "unknown", label: `Item ${itemNumber} ${label}`.trim() };
 }
 
 export function detectFilingSections(text: string, formType: string): ParsedFilingSection[] {
   const headings: Array<{ sectionType: string; label: string; startOffset: number }> = [];
+  const priorItems = new Map<string, (typeof headings)[number]>();
   let offset = 0;
+  let part: string | undefined;
   for (const line of text.split("\n")) {
-    const match = sectionMatch(line, formType);
-    if (match) headings.push({ ...match, startOffset: offset });
+    const partHeading = line.match(/^part\s+(II|I)\b(?:\s*[.:-]?\s*)(.*)$/i);
+    let itemLine = line;
+    if (formType.startsWith("10-Q") && partHeading) {
+      part = partHeading[1].toUpperCase();
+      if (/^item\s/i.test(partHeading[2])) itemLine = partHeading[2];
+      else headings.push({ sectionType: "unknown", label: line, startOffset: offset });
+    }
+    // Printed TOC entries are evidence, but not reliable section boundaries.
+    const isContentsEntry = /\.{2,}\s*\d+\s*$/.test(line) || /\s\d+\s*$/.test(line);
+    const match = isContentsEntry ? undefined : sectionMatch(itemLine, formType, part);
+    if (match) {
+      const key = `${part ?? ""}:${itemLine.match(/^item\s+(\d+(?:\.\d+)?[a-z]?)/i)?.[1].toUpperCase()}`;
+      const prior = priorItems.get(key);
+      if (prior) {
+        // A repeated item often comes from the TOC. Keep its text, but do not
+        // present that earlier range as confidently classified filing content.
+        prior.sectionType = "unknown";
+        prior.label = `Unclassified repeated heading — ${prior.label}`;
+      }
+      const heading = { ...match, startOffset: offset };
+      headings.push(heading);
+      priorItems.set(key, heading);
+    }
     offset += line.length + 1;
+  }
+  if (headings.length > 0 && headings[0].startOffset > 0) {
+    headings.unshift({ sectionType: "unknown", label: "Document preamble", startOffset: 0 });
   }
   return headings.map((heading, index) => ({
     ...heading,

@@ -24,6 +24,8 @@ Meaning search requires `AI_MODE=local`, `AI_EMBEDDING_PROVIDER=ollama`, `AI_EMB
 
 Vectors use exact cosine retrieval in PostgreSQL for the initial local corpus. An approximate vector index can follow measured performance needs.
 
+Parser upgrades also backfill from preserved sources at worker startup or through Update index. Existing evidence is excluded from search until rebuilt with the current parser; new chunks are then embedded normally. The worker renews active leases every 30 seconds and recovers expired work every 10 seconds. Persistence checks the worker and attempt identity transactionally, preventing retired attempts from replacing current evidence. Three expired attempts become a visible terminal failure.
+
 ## Local AI runtime (Ollama)
 
 secThing can run Ollama as an optional Compose service, so no inference runtime is required on the host OS. The base stack stays AI-free; enable AI only after choosing local models in `.env`:
@@ -87,3 +89,5 @@ npm run dev:frontend
 Run `npm test`, `npm run check`, and `npm run build`. PostgreSQL lifecycle integration tests require a disposable pgvector PostgreSQL instance; set `TEST_DATABASE_URL` when running `npm test` to enable them. These tests create and remove a unique schema and never use the application's `DATABASE_URL`. Without `TEST_DATABASE_URL`, the integration suite is skipped.
 
 For browser interaction tests, run `npx playwright install --with-deps chromium`, then `npm run test:browser`. The suite starts the frontend and supplies fixture API responses; it needs neither SEC access nor Ollama. Set `CHROMIUM_PATH` to use an existing Chromium binary.
+
+For a real embedding-model smoke test, export `TEST_DATABASE_URL` for a disposable pgvector database, `AI_EMBEDDING_BASE_URL` for an Ollama endpoint reachable from the command's runtime, and `AI_EMBEDDING_MODEL` for an already pulled model. Then run `npm run validate:retrieval`. The script uses the real parser, index, Ollama adapter, and retrieval against four synthetic filings; it reports indexing/query latency and expected-source ranking for eight semantic/hybrid checks. It requires complete embedding coverage, no fallback, expected sources in the top three, and at least six expected sources ranked first. This small smoke set does not establish real-filing relevance. Temporary sources and its isolated database schema are removed on completion or failure; the script never falls back to the application's `DATABASE_URL`.
