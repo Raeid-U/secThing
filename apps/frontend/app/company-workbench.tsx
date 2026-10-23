@@ -2,8 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AddCompany } from "./research/add-company";
+import { CompanyLibrary, LibraryHome } from "./research/company-library";
 import { DocumentReader } from "./research/document-reader";
 import { useWorkspace } from "./research/use-workspace";
+import { SystemStatus } from "./system-status";
 import {
   dateLabel,
   emptyLocation,
@@ -84,17 +86,21 @@ export function CompanyWorkbench() {
           dateLabel(filing.filing_date) <= location.filedBefore) &&
         (!stateFilter || filingState(filing).tone === stateFilter),
     ) ?? [];
-  const visibleCompanies = companies.filter((company) =>
-    `${company.legal_name} ${company.tickers.join(" ")}`
-      .toLowerCase()
-      .includes(libraryQuery.toLowerCase()),
-  );
   const groups = [...new Set(hits.map((hit) => String(hit.filing_id)))].map(
     (id) => hits.filter((hit) => String(hit.filing_id) === id),
   );
   const processing =
     detail?.jobs.filter((job) => ["pending", "running"].includes(job.status))
       .length ?? 0;
+  const filtersActive = Boolean(
+    location.formType || location.filedAfter || location.filedBefore ||
+      location.sectionType || stateFilter,
+  );
+
+  function resetFilters() {
+    setStateFilter("");
+    navigate({ formType: "", filedAfter: "", filedBefore: "", sectionType: "" });
+  }
 
   function openCompany(id: string) {
     navigate({ ...emptyLocation, company: id });
@@ -181,82 +187,29 @@ export function CompanyWorkbench() {
           >
             ☰
           </button>
-          <a href="/home">secThing</a>
-          <span>Research workspace</span>
+          <a href="/records">secThing</a>
+          <span>Evidence library</span>
         </div>
-        <button className="primary-button" onClick={() => setIntake(true)}>
-          ＋ Add company
-        </button>
+        <div className="header-actions">
+          <SystemStatus />
+          <button className="primary-button" onClick={() => setIntake(true)}>
+            Add company
+          </button>
+        </div>
       </header>
       {library && (
-        <aside className="library-panel" aria-label="Company library">
-          <div className="library-title">
-            <h2>Library</h2>
-            <span>{companies.length} companies</span>
-          </div>
-          <input
-            aria-label="Filter company library"
-            className="library-search"
-            placeholder="Find in your library…"
-            value={libraryQuery}
-            onChange={(e) => setLibraryQuery(e.target.value)}
-          />
-          <div className="company-scroll">
-            {visibleCompanies.length ? (
-              visibleCompanies.map((company) => (
-                <button
-                  className={`library-company ${String(company.id) === location.company ? "selected" : ""}`}
-                  key={company.id}
-                  onClick={() => openCompany(String(company.id))}
-                >
-                  <div>
-                    <strong>{company.tickers[0] ?? "Issuer"}</strong>
-                    <span
-                      className={
-                        ["running", "pending"].includes(
-                          company.ingestion_status ?? "",
-                        )
-                          ? "processing-dot"
-                          : ""
-                      }
-                    />
-                  </div>
-                  <span>{company.legal_name}</span>
-                  <small>CIK {String(company.cik).padStart(10, "0")}</small>
-                </button>
-              ))
-            ) : (
-              <div className="empty-panel">
-                <p>
-                  {libraryQuery
-                    ? "No companies match this filter."
-                    : "Your library is empty."}
-                </p>
-                {!libraryQuery && (
-                  <button onClick={() => setIntake(true)}>
-                    Add your first company
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="library-footer">SEC filings, preserved locally</div>
-        </aside>
+        <CompanyLibrary
+          companies={companies}
+          selectedId={location.company}
+          query={libraryQuery}
+          onQuery={setLibraryQuery}
+          onAdd={() => setIntake(true)}
+          onOpen={openCompany}
+        />
       )}
       <main className="workspace-main">
         {!location.company ? (
-          <div className="workspace-welcome">
-            <span className="welcome-symbol">≋</span>
-            <h1>Your evidence, in one place.</h1>
-            <p>
-              Choose a company from your library to browse its filings, search
-              disclosures, and compare original sources with extracted text.
-            </p>
-            <button className="primary-button" onClick={() => setIntake(true)}>
-              Add a company
-            </button>
-            <small>Local-first research. Not investment advice.</small>
-          </div>
+          <LibraryHome companies={companies} onAdd={() => setIntake(true)} onOpen={openCompany} />
         ) : (
           <>
             <header className="company-toolbar">
@@ -272,11 +225,11 @@ export function CompanyWorkbench() {
               <div className="coverage">
                 <strong>
                   {detail?.search.chunks ?? 0}
-                  <small>indexed passages</small>
+                  <small>searchable passages</small>
                 </strong>
                 <strong>
                   {detail?.search.embedded ?? 0}
-                  <small>meaning-ready</small>
+                  <small>ready for meaning search</small>
                 </strong>
                 {processing > 0 && (
                   <span className="processing-label">
@@ -285,7 +238,7 @@ export function CompanyWorkbench() {
                   </span>
                 )}
                 <button onClick={() => void reindex()} disabled={indexing}>
-                  {indexing ? "Queueing…" : "Update index"}
+                  {indexing ? "Updating…" : "Update evidence"}
                 </button>
               </div>
             </header>
@@ -307,7 +260,7 @@ export function CompanyWorkbench() {
                 <span aria-hidden="true">⌕</span>
                 <input
                   aria-label="Search company evidence"
-                  placeholder="Search disclosures, risks, business changes…"
+                  placeholder="Search this company’s evidence"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   minLength={2}
@@ -324,12 +277,12 @@ export function CompanyWorkbench() {
                 value={location.mode}
                 onChange={(event) => navigate({ mode: event.target.value })}
               >
-                <option value="full_text">Keyword</option>
+                <option value="full_text">Exact words</option>
                 <option value="semantic" disabled={!detail?.search.configured}>
-                  Meaning
+                  Related meaning
                 </option>
                 <option value="hybrid" disabled={!detail?.search.configured}>
-                  Combined
+                  Best match
                 </option>
               </select>
               {location.q && (
@@ -346,7 +299,7 @@ export function CompanyWorkbench() {
                     });
                   }}
                 >
-                  Clear search
+                  Clear query
                 </button>
               )}
             </form>
@@ -414,10 +367,13 @@ export function CompanyWorkbench() {
                   <option value="muted">Catalogue only</option>
                 </select>
               )}
+              {filtersActive && (
+                <button type="button" className="reset-filters" onClick={resetFilters}>Reset filters</button>
+              )}
               <span>
                 {detail?.search.configured
-                  ? `${detail.search.model} · ${detail.search.pending} jobs pending${detail.search.failed ? ` · ${detail.search.failed} failed (Update index to retry)` : ""}`
-                  : "Meaning search is off. Keyword search remains available."}
+                  ? `${detail.search.model} · ${detail.search.pending} pending${detail.search.failed ? ` · ${detail.search.failed} failed` : ""}`
+                  : "Meaning search is unavailable. Exact-word search still works."}
               </span>
             </div>
             {(error || notice || searchNote) && (
@@ -445,7 +401,7 @@ export function CompanyWorkbench() {
               >
                 <header>
                   <div>
-                    <h2>{location.q ? "Search results" : "Filings"}</h2>
+                    <h2>{location.q ? `Results for “${location.q}”` : "Filing evidence"}</h2>
                     <span>
                       {location.q
                         ? `${hits.length} passage${hits.length === 1 ? "" : "s"} in ${groups.length} filing${groups.length === 1 ? "" : "s"}`
@@ -454,7 +410,6 @@ export function CompanyWorkbench() {
                   </div>
                   {location.filing && (
                     <button
-                      aria-label="Return to filing list"
                       onClick={() =>
                         navigate({ filing: "", hash: "", start: "", end: "" })
                       }
@@ -466,7 +421,7 @@ export function CompanyWorkbench() {
                 <div className="results-scroll" ref={resultsPane}>
                   {!detail ? (
                     <div className="empty-panel">
-                      Loading your filing library…
+                      Loading filing evidence…
                     </div>
                   ) : location.q ? (
                     searching ? (
@@ -497,7 +452,7 @@ export function CompanyWorkbench() {
                                 <Snippet text={hit.snippet} />
                               </p>
                               <small>
-                                Open passage <span aria-hidden="true">↗</span>
+                                Inspect source
                               </small>
                             </button>
                           ))}

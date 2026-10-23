@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { dateLabel, type Filing, type Hit, type Reader } from "./types";
 
 type Props = {
@@ -14,6 +14,55 @@ type Props = {
   onNext: (direction: number) => void;
   hasHits: boolean;
 };
+
+function EvidenceDialog({
+  reader,
+  hit,
+  selectedStart,
+  selectedEnd,
+  onClose,
+  returnFocus,
+}: {
+  reader: Reader | null;
+  hit?: Hit;
+  selectedStart?: number;
+  selectedEnd?: number;
+  onClose: () => void;
+  returnFocus: RefObject<HTMLButtonElement>;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+    dialog.current?.querySelector<HTMLElement>("h2")?.focus();
+    return () => { requestAnimationFrame(() => returnFocus.current?.focus()); };
+  }, [returnFocus]);
+  return (
+    <dialog
+      ref={dialog}
+      className="evidence-dialog"
+      aria-labelledby="evidence-title"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClose={onClose}
+    >
+      <header className="dialog-heading">
+        <div><p>Source provenance</p><h2 id="evidence-title" tabIndex={-1}>Evidence details</h2></div>
+        <button className="icon-button" aria-label="Close evidence details" onClick={onClose}>×</button>
+      </header>
+      <div className="evidence-dialog-body">
+        <p className="evidence-intro">These identifiers connect the text you are reading to the preserved filing and indexed passage.</p>
+        <dl>
+          <div><dt>Parser version</dt><dd>{reader?.document.parserVersion ?? "Unavailable"}</dd></div>
+          <div><dt>Normalized text hash</dt><dd>{reader?.document.textHash ?? "Unavailable"}</dd></div>
+          <div><dt>Selected range</dt><dd>{selectedStart !== undefined ? `${selectedStart}–${selectedEnd} characters` : "No search passage selected"}</dd></div>
+        </dl>
+        {hit && <section><h3>Indexed passage</h3><pre>{hit.chunk_text}</pre></section>}
+        {reader?.document.warnings.length ? (
+          <section className="evidence-warnings"><h3>Processing notes</h3>{reader.document.warnings.map((warning) => <p key={warning}>{warning}</p>)}</section>
+        ) : null}
+      </div>
+    </dialog>
+  );
+}
 
 export function DocumentReader({
   filing,
@@ -30,6 +79,7 @@ export function DocumentReader({
   const [ratio, setRatio] = useState(50);
   const [fontSize, setFontSize] = useState(16);
   const [evidence, setEvidence] = useState(false);
+  const evidenceTrigger = useRef<HTMLButtonElement>(null);
   const comparison = useRef<HTMLDivElement>(null);
   const extraction = useRef<HTMLDivElement>(null);
   const mark = useRef<HTMLElement>(null);
@@ -124,7 +174,7 @@ export function DocumentReader({
         </div>
       </header>
       <div className="view-toolbar">
-        <div className="segmented" aria-label="Document display">
+        <div className="segmented" role="group" aria-label="Document display">
           {["both", "original", "extracted"].map((item) => (
             <button
               key={item}
@@ -142,17 +192,18 @@ export function DocumentReader({
         <div className="reader-actions">
           <button
             onClick={() => setFontSize(Math.max(12, fontSize - 1))}
-            aria-label="Smaller extraction text"
+            aria-label="A−, smaller extraction text"
           >
             A−
           </button>
           <button
             onClick={() => setFontSize(Math.min(24, fontSize + 1))}
-            aria-label="Larger extraction text"
+            aria-label="A+, larger extraction text"
           >
             A+
           </button>
           <button
+            ref={evidenceTrigger}
             aria-pressed={evidence}
             onClick={() => setEvidence(!evidence)}
           >
@@ -287,40 +338,7 @@ export function DocumentReader({
           </small>
         </section>
       </div>
-      {evidence && (
-        <aside className="evidence-drawer">
-          <header>
-            <strong>Evidence record</strong>
-            <button
-              aria-label="Close evidence details"
-              onClick={() => setEvidence(false)}
-            >
-              ×
-            </button>
-          </header>
-          <dl>
-            <dt>Parser</dt>
-            <dd>{reader?.document.parserVersion ?? "Not available"}</dd>
-            <dt>Normalized text hash</dt>
-            <dd>{reader?.document.textHash ?? "Not available"}</dd>
-            <dt>Selected range</dt>
-            <dd>
-              {selectedStart !== undefined
-                ? `${selectedStart}–${selectedEnd} characters`
-                : "No retrieved passage selected"}
-            </dd>
-          </dl>
-          {hit && (
-            <>
-              <h3>Indexed passage</h3>
-              <pre>{hit.chunk_text}</pre>
-            </>
-          )}
-          {reader?.document.warnings.map((warning) => (
-            <p key={warning}>{warning}</p>
-          ))}
-        </aside>
-      )}
+      {evidence && <EvidenceDialog reader={reader} hit={hit} selectedStart={selectedStart} selectedEnd={selectedEnd} onClose={() => setEvidence(false)} returnFocus={evidenceTrigger} />}
     </section>
   );
 }

@@ -4,6 +4,10 @@ export type Company = {
   legal_name: string;
   tickers: string[];
   ingestion_status: string | null;
+  exchange?: string | null;
+  earliest_requested_filing_date?: string | null;
+  latest_requested_filing_date?: string | null;
+  progress?: Record<string, unknown> | null;
 };
 export type Filing = {
   id: string;
@@ -33,7 +37,14 @@ export type Detail = {
     earliest_requested_filing_date: string | null;
   };
   filings: Filing[];
-  jobs: { id: string; status: string; last_error: string | null }[];
+  jobs: {
+    id: string;
+    status: string;
+    progress: Record<string, unknown> | null;
+    last_error: string | null;
+    created_at: string;
+    updated_at: string;
+  }[];
   search: SearchStatus;
 };
 export type Hit = {

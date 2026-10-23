@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workbench · Frontend philosophy example</title>
+  <link rel="stylesheet" href="foundation.css">
+</head>
+<body>
+  <header class="shell app-header">
+    <strong>Workbench</strong>
+    <nav aria-label="Primary"><a href="#main" aria-current="page">Item explorer</a></nav>
+    <button class="text-action" id="theme">Use light theme</button>
+  </header>
+  <main class="shell" id="main">
+    <div class="page-heading">
+      <h1>Item explorer <button class="help-trigger" id="help" aria-label="About this view" aria-haspopup="dialog">(?)</button></h1>
+      <div class="status-bar">
+        <span class="status" id="source-status" data-state="stale">Sample data · no live source</span>
+        <button class="text-action" id="refresh">Simulate refresh</button>
+        <span class="sr-only" id="refresh-announcement" role="status"></span>
+      </div>
+    </div>
+    <div class="toolbar" role="group" aria-label="Item filters">
+      <label class="search-control"><span>Search name, category or tags</span><input type="search" id="query" placeholder="Search items…"></label>
+      <label><span>Rank by</span><select id="sort"><option value="value">Value</option><option value="throughput">Throughput</option><option value="name">Name</option></select></label>
+      <div class="filter-group" role="group" aria-label="Category">
+        <button aria-pressed="true" data-category="all">All</button>
+        <button aria-pressed="false" data-category="Tools">Tools</button>
+        <button aria-pressed="false" data-category="Parts">Parts</button>
+      </div>
+      <label class="check"><input type="checkbox" id="eligible">Available only</label>
+      <button class="text-action" id="reset" hidden>Reset filters</button>
+      <span class="result-count muted" id="count" role="status"></span>
+    </div>
+    <ul class="item-list" id="items" aria-label="Matching items"></ul>
+    <div class="empty-state" id="empty" hidden><h2>No matching items</h2><p class="muted">Try another search or reset your filters.</p><button class="text-action" id="empty-reset">Reset filters</button></div>
+    <footer class="work-section muted"><p>Independent design example. Synthetic records; values do not represent live market data.</p></footer>
+  </main>
+  <dialog id="details" aria-labelledby="dialog-title">
+    <div class="dialog-heading"><h2 id="dialog-title" tabindex="-1"></h2><button id="close" aria-label="Close details">Close ×</button></div>
+    <div id="dialog-body"></div>
+  </dialog>
+  <script>
+    // Replace this local data boundary with the host application's data layer.
+    const items = [
+      {id:'a',name:'Precision driver',category:'Tools',tags:['assembly','compact'],eligible:true,value:120,throughput:18},
+      {id:'b',name:'Valve assembly',category:'Parts',tags:['fluid','service'],eligible:true,value:75,throughput:90},
+      {id:'c',name:'Heavy-duty adjustable calibration fixture',category:'Tools',tags:['measurement','bench'],eligible:false,value:240,throughput:6},
+      {id:'d',name:'Alloy plate',category:'Parts',tags:['metal','assembly'],eligible:true,value:0,throughput:240},
+      {id:'e',name:'Replacement coupling',category:'Parts',tags:['service','connector'],eligible:false,value:null,throughput:null},
+      {id:'f',name:'Bench gauge',category:'Tools',tags:['measurement'],eligible:true,value:120,throughput:12}
+    ];
+    const byId = id => document.getElementById(id);
+    const number = new Intl.NumberFormat(undefined,{maximumFractionDigits:1});
+    const format = value => value === null ? 'Unavailable' : number.format(value);
+    let category = 'all';
+    function compareNames(a,b) { return a.name.localeCompare(b.name) || a.id.localeCompare(b.id); }
+    function visibleItems() {
+      const terms = byId('query').value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+      const sort = byId('sort').value;
+      return items.filter(item => {
+        const haystack = [item.name,item.category,...item.tags].join(' ').toLocaleLowerCase();
+        return terms.every(term => haystack.includes(term)) && (category === 'all' || item.category === category) && (!byId('eligible').checked || item.eligible);
+      }).sort((a,b) => {
+        if(sort === 'name') return compareNames(a,b);
+        const av = a[sort], bv = b[sort];
+        if(av === null) return bv === null ? compareNames(a,b) : 1;
+        if(bv === null) return -1;
+        return bv-av || compareNames(a,b);
+      });
+    }
+    function text(tag,content,className) {
+      const node = document.createElement(tag); node.textContent = content;
+      if(className) node.className = className; return node;
+    }
+    let trigger = null;
+    const dialog = byId('details');
+    function openDetails(title,nodes) {
+      trigger = document.activeElement;
+      byId('dialog-title').textContent = title;
+      byId('dialog-body').replaceChildren(...nodes);
+      dialog.showModal();
+      document.body.style.overflow = 'hidden';
+      byId('dialog-title').focus();
+    }
+    dialog.addEventListener('close', () => {
+      document.body.style.overflow = '';
+      if(trigger?.isConnected) trigger.focus();
+    });
+    byId('close').onclick = () => dialog.close();
+    function inspect(item) {
+      openDetails(item.name,[
+        text('p',`${item.category} · ${item.eligible ? 'Available' : 'Unavailable'}`,'muted'),
+        text('h3','Reference values'),
+        text('p',`Value: ${format(item.value)}${item.value === null ? '' : ' credits'} · Throughput: ${format(item.throughput)}${item.throughput === null ? '' : ' / hour'}`,'number'),
+        text('p',`Search tags: ${item.tags.join(', ')}.`),
+        text('p','These are synthetic reference values. Unavailable is distinct from zero. A real application would include provenance, relevant inputs, and the actions needed for this item.')
+      ]);
+    }
+    function render() {
+      const rows = visibleItems(), sort = byId('sort').value;
+      const metric = sort === 'throughput' ? 'throughput' : 'value';
+      const label = metric === 'value' ? 'Value · credits' : 'Throughput · per hour';
+      byId('items').replaceChildren(...rows.map(item => {
+        const li = text('li','','item-row');
+        const identity = text('div','','item-identity');
+        const title = text('button',item.name,'item-title');
+        title.setAttribute('aria-haspopup','dialog'); title.onclick = () => inspect(item);
+        identity.append(title,text('p',`${item.category} · ${item.eligible ? 'Available' : 'Unavailable'}`));
+        const result = text('div','','item-metric');
+        result.append(text('small',label),text('strong',format(item[metric]),'number'));
+        li.append(identity,result); return li;
+      }));
+      byId('items').setAttribute('aria-label',`Items ordered by ${sort}${sort === 'name' ? '' : ', highest first'}`);
+      byId('count').textContent = `${rows.length} of ${items.length} items`;
+      byId('empty').hidden = rows.length !== 0;
+      byId('reset').hidden = !byId('query').value && category === 'all' && !byId('eligible').checked;
+      document.querySelectorAll('[data-category]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.category === category)));
+    }
+    function reset() { byId('query').value=''; byId('eligible').checked=false; category='all'; render(); byId('query').focus(); }
+    byId('query').addEventListener('input',render);
+    byId('sort').addEventListener('change',render);
+    byId('eligible').addEventListener('change',render);
+    document.querySelectorAll('[data-category]').forEach(button => button.onclick = () => { category=button.dataset.category; render(); });
+    byId('reset').onclick=reset; byId('empty-reset').onclick=reset;
+    byId('help').onclick = () => openDetails('About this view',[
+      text('p','Compare items by value or throughput, or browse alphabetically. Search includes names, categories and tags. Filters work together.'),
+      text('h3','Reading the values'),
+      text('p','The selected metric stays visible on small screens. Missing values sort last; zero is a valid value. Open an item for the secondary metric and supporting information.'),
+      text('p','This example illustrates a neutral workspace without a card around every control or record. The refresh action only simulates a request; it does not fetch or persist anything.')
+    ]);
+    byId('theme').onclick = () => {
+      const light = document.documentElement.dataset.theme !== 'light';
+      document.documentElement.dataset.theme = light ? 'light' : 'dark';
+      byId('theme').textContent = light ? 'Use dark theme' : 'Use light theme';
+    };
+    byId('refresh').onclick = async () => {
+      const button=byId('refresh'), status=byId('source-status');
+      button.disabled=true; status.dataset.state='updating'; status.textContent='Simulating refresh · sample data retained';
+      byId('refresh-announcement').textContent='Simulated refresh started.';
+      await new Promise(resolve => setTimeout(resolve,900));
+      status.dataset.state='idle'; status.textContent='Simulation complete · sample data only';
+      byId('refresh-announcement').textContent='Simulated refresh complete. No live data was fetched.'; button.disabled=false;
+    };
+    render();
+  </script>
+</body>
+</html>
