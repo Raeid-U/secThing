@@ -1,4 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+
+test.setTimeout(60_000);
 
 const company = {
   id: "1",
@@ -50,7 +53,15 @@ async function fixture(page: Page) {
         body: "<h1>Original filing</h1><p>Northstar provides cloud software to regulated industries.</p>",
       });
     let body: unknown = {};
-    if (url.pathname === "/api/v1/companies/resolve")
+    if (url.pathname === "/api/v1/system/readiness")
+      body = { status: "ready", checks: [{ name: "Database", status: "pass" }] };
+    else if (url.pathname === "/api/v1/system/ai/status")
+      body = {
+        mode: "local", status: "available", models: [],
+        chat: { configuredModel: "fixture-chat", available: true },
+        embeddings: { configuredModel: "nomic-embed-text", available: true },
+      };
+    else if (url.pathname === "/api/v1/companies/resolve")
       body = {
         company: {
           id: "1",
@@ -117,8 +128,29 @@ async function fixture(page: Page) {
   });
 }
 
+async function expectAccessible(page: Page) {
+  const results = await new AxeBuilder({ page })
+    .exclude("iframe")
+    .exclude(".extracted-scroll")
+    .analyze();
+  expect(results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""))).toEqual([]);
+}
+
 test.beforeEach(async ({ page }) => {
   await fixture(page);
+});
+
+test("library is the useful home and exposes service details", async ({ page }) => {
+  await page.goto("/records");
+  await expect(page.getByRole("heading", { name: "Your company library" })).toBeVisible();
+  const companyRow = page.getByRole("main").getByRole("button", { name: /Northstar Technology/ });
+  await expect(companyRow).toBeVisible();
+  await page.getByRole("button", { name: "Services ready" }).click();
+  await expect(page.getByRole("dialog", { name: "Services ready" })).toBeVisible();
+  await expectAccessible(page);
+  await page.getByRole("button", { name: "Close system status" }).click();
+  await companyRow.click();
+  await expect(page.getByRole("heading", { name: company.legal_name })).toBeVisible();
 });
 
 test("fixed frame, source comparison, passage navigation and retained search", async ({
@@ -133,6 +165,13 @@ test("fixed frame, source comparison, passage navigation and retained search", a
       () => document.documentElement.scrollHeight <= window.innerHeight,
     ),
   ).toBe(true);
+  await page.getByLabel("Form filter").selectOption("10-Q");
+  await expect(page.getByRole("button", { name: "Reset filters" })).toBeVisible();
+  await page.getByRole("button", { name: "Reset filters" }).click();
+  await expect(page.getByLabel("Form filter")).toHaveValue("");
+  await page.getByLabel("Search mode").selectOption("hybrid");
+  await expect(page.getByLabel("Search mode")).toHaveValue("hybrid");
+  await page.getByLabel("Search mode").selectOption("full_text");
   await page
     .getByRole("textbox", { name: "Search company evidence" })
     .fill("cloud software");
@@ -149,6 +188,11 @@ test("fixed frame, source comparison, passage navigation and retained search", a
       .frameLocator('iframe[title="Preserved original SEC filing"]')
       .getByText("Original filing"),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Evidence details" }).click();
+  await expect(page.getByRole("dialog", { name: "Evidence details" })).toBeVisible();
+  await expect(page.getByText("fixture-hash")).toBeVisible();
+  await page.getByRole("button", { name: "Close evidence details" }).click();
+  await expectAccessible(page);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollHeight <= window.innerHeight,
@@ -180,7 +224,7 @@ test("guided intake resolves identity, confirms scope, and restores focus", asyn
 }) => {
   await page.goto("/records");
   await page
-    .getByRole("button", { name: "＋ Add company", exact: true })
+    .getByRole("button", { name: "Add company", exact: true }).first()
     .click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.getByRole("textbox", { name: "Ticker", exact: true }).fill("NST");
@@ -202,14 +246,23 @@ test("guided intake resolves identity, confirms scope, and restores focus", asyn
     page.getByRole("heading", { name: company.legal_name }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "＋ Add company", exact: true })
+    .getByRole("button", { name: "Add company", exact: true }).first()
     .click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "＋ Add company", exact: true }),
+    page.getByRole("button", { name: "Add company", exact: true }).first(),
   ).toBeFocused();
+});
+
+test("intermediate layout keeps the library and page controls usable", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 900 });
+  await page.goto("/records");
+  await page.getByRole("button", { name: "Show company library" }).click();
+  await expect(page.getByRole("complementary", { name: "Company library" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/library-tablet.png" });
 });
 
 test("mobile reader switches panes without introducing page scroll", async ({
