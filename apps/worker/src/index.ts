@@ -11,6 +11,7 @@ import {
   connectDatabase,
   assessWorkerReadiness,
   filingParserVersion,
+  filingArchiveDirectoryUrl,
   isSupportedMvpForm,
   loadConfig,
   SecClient,
@@ -218,25 +219,38 @@ async function acquireFilingSource(item: WorkItem): Promise<void> {
   `;
   const filing = filings[0];
   if (!filing) throw new Error("Filing no longer exists.");
-  const document = await sec.acquirePrimaryFiling({
+  const acquisition = await sec.acquireFilingDocuments({
     cik: filing.cik,
     accessionNumber: filing.accession_number,
     formType: filing.form_type,
     primaryDocument: filing.primary_document ?? undefined,
   });
   await queue.transaction(item, async (sql) => {
-    await storeResponse(sql, document.indexResponse);
-    const documents = await sql<{ id: number }[]>`
-      INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size, status, fetched_at)
-      VALUES (${filing.id}, ${document.documentName}, ${document.documentType}, ${document.url}, ${document.bodyPath}, ${document.contentType}, ${document.contentHash}, ${document.byteSize}, 'downloaded', now())
-      ON CONFLICT (filing_id, document_name) DO UPDATE SET
-        document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
-        content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
-        status = 'downloaded', last_error = NULL, fetched_at = now(), updated_at = now()
-      RETURNING id
-    `;
+    await storeResponse(sql, acquisition.indexResponse);
+    const downloaded = new Map(acquisition.documents.map((document) => [document.documentName, document]));
+    const parseIds: number[] = [];
+    for (const entry of acquisition.manifest) {
+      const document = downloaded.get(entry.documentName);
+      const url = `${filingArchiveDirectoryUrl(filing.cik, filing.accession_number)}/${encodeURIComponent(entry.documentName)}`;
+      const documents = await sql<{ id: number }[]>`
+        INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size,
+          status, stage, excluded_at, exclusion_reason, retryable, fetched_at)
+        VALUES (${filing.id}, ${entry.documentName}, ${entry.classification}, ${url}, ${document?.bodyPath ?? null},
+          ${document?.contentType ?? null}, ${document?.contentHash ?? null}, ${document?.byteSize ?? entry.byteSize ?? null},
+          ${entry.included ? "downloaded" : "excluded"}, ${entry.included ? "downloaded" : "excluded"},
+          ${entry.included ? null : new Date()}, ${entry.exclusionReason ?? null}, ${entry.included}, ${entry.included ? new Date() : null})
+        ON CONFLICT (filing_id, document_name) DO UPDATE SET
+          document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
+          content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
+          status = EXCLUDED.status, stage = EXCLUDED.stage, excluded_at = EXCLUDED.excluded_at,
+          exclusion_reason = EXCLUDED.exclusion_reason, retryable = EXCLUDED.retryable,
+          last_error = NULL, fetched_at = EXCLUDED.fetched_at, updated_at = now()
+        RETURNING id
+      `;
+      if (entry.included) parseIds.push(documents[0].id);
+    }
     await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
-    await queueParsing(sql, item.job_id, item.company_id, filing.id, documents[0].id);
+    for (const documentId of parseIds) await queueParsing(sql, item.job_id, item.company_id, filing.id, documentId);
   });
 }
 

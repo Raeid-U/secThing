@@ -3,7 +3,7 @@ export { connectDatabase } from "./database.js";
 export { applyMigrations, migrationChecksum, migrationsAreCurrent } from "./migrations.js";
 export { assessReadiness, assessWorkerReadiness, capabilities } from "./readiness.js";
 export { OllamaClient, inspectAiRuntime, verifyAiChat, type AiModel, type AiRuntimeStatus, type ChatMessage, type ChatProvider, type ChatRequest, type ChatResponse, type EmbeddingProvider, type EmbeddingRequest, type EmbeddingResponse } from "./ai.js";
-export { SecClient, canonicalCik, filingArchiveDirectoryUrl, isSupportedMvpForm, type AcquiredFilingDocument, type CompanySubmission, type SecAddress, type SubmissionFiling, type TickerMatch } from "./sec.js";
+export { SecClient, canonicalCik, classifyFilingDocument, filingArchiveDirectoryUrl, isSupportedMvpForm, type AcquiredFilingDocument, type FilingManifestEntry, type CompanySubmission, type SecAddress, type SubmissionFiling, type TickerMatch } from "./sec.js";
 export { FilingParser, detectFilingSections, filingParserVersion, normalizeFilingText, type ParsedFiling, type ParsedFilingSection } from "./filing-parser.js";
 export { ChunkingAndIndexing, chunkingProfileVersion, type ChunkingSection, type IndexedChunk } from "./chunking.js";
 export { backfillSearchIndex, chunkDocument, parseFilingSource } from "./evidence-pipeline.js";

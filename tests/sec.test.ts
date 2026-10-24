@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { canonicalCik, filingArchiveDirectoryUrl, isSupportedMvpForm, SecClient } from "@secthing/platform";
+import { canonicalCik, classifyFilingDocument, filingArchiveDirectoryUrl, isSupportedMvpForm, SecClient } from "@secthing/platform";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -22,6 +22,13 @@ async function clientFor(responses: Record<string, unknown>) {
 }
 
 describe("SEC identity and submissions client", () => {
+  it("classifies the complete filing directory before download", () => {
+    const input = { primaryDocument: "report.htm", formType: "10-K" };
+    expect(classifyFilingDocument({ ...input, name: "report.htm", secType: "10-K" })).toMatchObject({ classification: "primary_filing", included: true });
+    expect(classifyFilingDocument({ ...input, name: "contract.pdf", secType: "EX-10.1" })).toMatchObject({ classification: "exhibit", included: true });
+    expect(classifyFilingDocument({ ...input, name: "issuer_cal.xml", secType: "EX-101.CAL" })).toMatchObject({ classification: "structured_fact", included: false });
+    expect(classifyFilingDocument({ ...input, name: "logo.png", secType: "GRAPHIC" })).toMatchObject({ classification: "excluded", included: false, exclusionReason: expect.any(String) });
+  });
   it("resolves LINC through the official ticker mapping and formats its CIK", async () => {
     const { client } = await clientFor({
       "https://www.sec.gov/files/company_tickers.json": { "0": { cik_str: 1286613, ticker: "LINC", title: "Lincoln Educational Services Corporation" } },

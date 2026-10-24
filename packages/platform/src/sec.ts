@@ -15,7 +15,7 @@ export type SecCachedResponse = {
 
 export type AcquiredFilingDocument = {
   documentName: string;
-  documentType: "primary_filing";
+  documentType: "primary_filing" | "exhibit";
   url: string;
   contentType: string | null;
   bodyPath: string;
@@ -23,6 +23,33 @@ export type AcquiredFilingDocument = {
   byteSize: number;
   indexResponse: SecCachedResponse;
 };
+
+export type FilingManifestEntry = {
+  documentName: string;
+  secType?: string;
+  byteSize?: number;
+  classification: "primary_filing" | "exhibit" | "structured_fact" | "excluded";
+  included: boolean;
+  exclusionReason?: string;
+};
+
+const HUMAN_READABLE_EXTENSIONS = new Set([".htm", ".html", ".txt", ".pdf"]);
+const TECHNICAL_EXTENSIONS = new Set([".xsd", ".xml", ".json"]);
+
+export function classifyFilingDocument(input: { name: string; secType?: string; primaryDocument?: string; formType: string }): FilingManifestEntry {
+  const name = input.name.toLowerCase();
+  const extension = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
+  const isPrimary = input.name === input.primaryDocument || input.secType === input.formType;
+  if (isPrimary && HUMAN_READABLE_EXTENSIONS.has(extension))
+    return { documentName: input.name, secType: input.secType, classification: "primary_filing", included: true };
+  if (input.secType?.toUpperCase().startsWith("EX-") && HUMAN_READABLE_EXTENSIONS.has(extension))
+    return { documentName: input.name, secType: input.secType, classification: "exhibit", included: true };
+  if (TECHNICAL_EXTENSIONS.has(extension) || /(?:_cal|_def|_lab|_pre)\./i.test(name))
+    return { documentName: input.name, secType: input.secType, classification: "structured_fact", included: false, exclusionReason: "Technical XBRL support file; companyfacts is ingested separately." };
+  if ([".jpg", ".jpeg", ".png", ".gif", ".svg", ".css", ".js"].includes(extension))
+    return { documentName: input.name, secType: input.secType, classification: "excluded", included: false, exclusionReason: "Non-text presentation or viewer asset." };
+  return { documentName: input.name, secType: input.secType, classification: "excluded", included: false, exclusionReason: "Not a supported human-readable filing document." };
+}
 
 export type TickerMatch = { ticker: string; cik: number; title: string };
 
@@ -224,6 +251,13 @@ export class SecClient {
   }
 
   async acquirePrimaryFiling(input: { cik: number; accessionNumber: string; formType: string; primaryDocument?: string }): Promise<AcquiredFilingDocument> {
+    const result = await this.acquireFilingDocuments(input);
+    const primary = result.documents.find((document) => document.documentType === "primary_filing");
+    if (!primary) throw new Error(`SEC filing index did not identify a primary ${input.formType} document for ${input.accessionNumber}.`);
+    return { ...primary, indexResponse: result.indexResponse };
+  }
+
+  async acquireFilingDocuments(input: { cik: number; accessionNumber: string; formType: string; primaryDocument?: string }): Promise<{ manifest: FilingManifestEntry[]; documents: AcquiredFilingDocument[]; indexResponse: SecCachedResponse }> {
     const directoryUrl = filingArchiveDirectoryUrl(input.cik, input.accessionNumber);
     const index = await this.fetchJson(`${directoryUrl}/index.json`);
     const root = index.body as Record<string, unknown>;
@@ -235,25 +269,26 @@ export class SecClient {
       if (!entry || typeof entry !== "object") return [];
       const item = entry as Record<string, unknown>;
       const name = safeDocumentName(asString(item.name));
-      return name ? [{ name, type: asString(item.type) }] : [];
+      return name ? [{ name, type: asString(item.type), size: typeof item.size === "number" ? item.size : undefined }] : [];
     });
     const preferred = safeDocumentName(input.primaryDocument);
     const documentName = preferred && documents.some((document) => document.name === preferred)
       ? preferred
       : documents.find((document) => document.type === input.formType)?.name;
     if (!documentName) throw new Error(`SEC filing index did not identify a primary ${input.formType} document for ${input.accessionNumber}.`);
-    const url = `${directoryUrl}/${encodeURIComponent(documentName)}`;
-    const document = await this.fetchText(url, join("sec", "filings", String(input.cik), input.accessionNumber.replaceAll("-", "")), "text/html, text/plain, application/xhtml+xml, */*");
-    return {
-      documentName,
-      documentType: "primary_filing",
-      url,
-      contentType: document.cache.contentType,
-      bodyPath: document.cache.bodyPath,
-      contentHash: document.cache.contentHash,
-      byteSize: Buffer.byteLength(document.text),
-      indexResponse: index.cache,
-    };
+    const manifest = documents.map((document) => ({
+      ...classifyFilingDocument({ name: document.name, secType: document.type, primaryDocument: documentName, formType: input.formType }),
+      byteSize: document.size,
+    }));
+    const acquired: AcquiredFilingDocument[] = [];
+    for (const entry of manifest.filter((candidate) => candidate.included)) {
+      const url = `${directoryUrl}/${encodeURIComponent(entry.documentName)}`;
+      const document = await this.fetchText(url, join("sec", "filings", String(input.cik), input.accessionNumber.replaceAll("-", "")), "text/html, text/plain, application/xhtml+xml, application/pdf, */*");
+      acquired.push({ documentName: entry.documentName, documentType: entry.classification as "primary_filing" | "exhibit", url,
+        contentType: document.cache.contentType, bodyPath: document.cache.bodyPath, contentHash: document.cache.contentHash,
+        byteSize: document.byteSize, indexResponse: index.cache });
+    }
+    return { manifest, documents: acquired, indexResponse: index.cache };
   }
 
   private async fetchJson(url: string): Promise<{ body: unknown; cache: SecCachedResponse }> {
@@ -261,7 +296,7 @@ export class SecClient {
     return { body: JSON.parse(response.text) as unknown, cache: response.cache };
   }
 
-  private async fetchText(url: string, relativeDirectory: string, accept: string): Promise<{ text: string; cache: SecCachedResponse }> {
+  private async fetchText(url: string, relativeDirectory: string, accept: string): Promise<{ text: string; byteSize: number; cache: SecCachedResponse }> {
     const userAgent = requireUserAgent(this.options.userAgent);
     const request = this.options.fetch ?? fetch;
     const attempts = 3;
@@ -270,7 +305,8 @@ export class SecClient {
       await this.waitForRateLimit();
       try {
         const response = await request(url, { headers: { "User-Agent": userAgent, Accept: accept } });
-        const text = await response.text();
+        const body = Buffer.from(await response.arrayBuffer());
+        const text = body.toString("utf8");
         if (!response.ok) {
           if ([403, 429, 500, 502, 503, 504].includes(response.status) && attempt < attempts - 1) {
             await this.backoff(attempt);
@@ -278,13 +314,14 @@ export class SecClient {
           }
           throw new Error(`SEC request failed (${response.status}) for ${url}.`);
         }
-        const contentHash = createHash("sha256").update(text).digest("hex");
+        const contentHash = createHash("sha256").update(body).digest("hex");
         const directory = join(this.options.dataDir, relativeDirectory);
         await mkdir(directory, { recursive: true });
         const bodyPath = join(directory, `${contentHash}${contentExtension(url, response.headers.get("content-type"))}`);
-        await writeFile(bodyPath, text, { flag: "w" });
+        await writeFile(bodyPath, body, { flag: "w" });
         return {
           text,
+          byteSize: body.byteLength,
           cache: { url, status: response.status, contentType: response.headers.get("content-type"), bodyPath, contentHash },
         };
       } catch (error) {
