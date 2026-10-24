@@ -235,39 +235,54 @@ async function acquireFilingSource(item: WorkItem): Promise<void> {
   `;
   const filing = filings[0];
   if (!filing) throw new Error("Filing no longer exists.");
-  const acquisition = await sec.acquireFilingDocuments({
+  const input = {
     cik: filing.cik,
     accessionNumber: filing.accession_number,
     formType: filing.form_type,
     primaryDocument: filing.primary_document ?? undefined,
-  });
-  await queue.transaction(item, async (sql) => {
-    await storeResponse(sql, acquisition.indexResponse);
-    await sql`DELETE FROM filing_documents WHERE filing_id = ${filing.id} AND document_name = '__manifest__' AND document_type = 'manifest_failure'`;
-    const downloaded = new Map(acquisition.documents.map((document) => [document.documentName, document]));
-    const parseIds: number[] = [];
-    for (const entry of acquisition.manifest) {
-      const document = downloaded.get(entry.documentName);
+  };
+  const discovery = await sec.discoverFilingManifest(input);
+  await queue.transaction(item, async (transaction) => {
+    await storeResponse(transaction, discovery.indexResponse);
+    await transaction`DELETE FROM filing_documents WHERE filing_id = ${filing.id} AND document_name = '__manifest__' AND document_type = 'manifest_failure'`;
+    for (const entry of discovery.manifest) {
       const url = `${filingArchiveDirectoryUrl(filing.cik, filing.accession_number)}/${encodeURIComponent(entry.documentName)}`;
-      const documents = await sql<{ id: number }[]>`
-        INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size,
-          status, stage, excluded_at, exclusion_reason, retryable, fetched_at)
-        VALUES (${filing.id}, ${entry.documentName}, ${entry.classification}, ${url}, ${document?.bodyPath ?? null},
-          ${document?.contentType ?? null}, ${document?.contentHash ?? null}, ${document?.byteSize ?? entry.byteSize ?? null},
-          ${entry.included ? "downloaded" : "excluded"}, ${entry.included ? "downloaded" : "excluded"},
-          ${entry.included ? null : new Date()}, ${entry.exclusionReason ?? null}, ${entry.included}, ${entry.included ? new Date() : null})
+      await transaction`
+        INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, byte_size,
+          status, stage, excluded_at, exclusion_reason, retryable)
+        VALUES (${filing.id}, ${entry.documentName}, ${entry.classification}, ${url}, ${entry.byteSize ?? null},
+          ${entry.included ? "discovered" : "excluded"}, ${entry.included ? "discovered" : "excluded"},
+          ${entry.included ? null : new Date()}, ${entry.exclusionReason ?? null}, ${entry.included})
         ON CONFLICT (filing_id, document_name) DO UPDATE SET
-          document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
-          content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
-          status = EXCLUDED.status, stage = EXCLUDED.stage, excluded_at = EXCLUDED.excluded_at,
-          exclusion_reason = EXCLUDED.exclusion_reason, retryable = EXCLUDED.retryable,
-          last_error = NULL, fetched_at = EXCLUDED.fetched_at, updated_at = now()
-        RETURNING id
+          document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url,
+          byte_size = COALESCE(filing_documents.byte_size, EXCLUDED.byte_size),
+          status = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.status ELSE EXCLUDED.status END,
+          stage = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.stage ELSE EXCLUDED.stage END,
+          excluded_at = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.excluded_at ELSE EXCLUDED.excluded_at END,
+          exclusion_reason = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.exclusion_reason ELSE EXCLUDED.exclusion_reason END,
+          retryable = EXCLUDED.retryable, last_error = NULL, updated_at = now()
       `;
-      if (entry.included) parseIds.push(documents[0].id);
     }
-    await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
-    for (const documentId of parseIds) await queueParsing(sql, item.job_id, item.company_id, filing.id, documentId);
+  });
+
+  const downloaded = await sql<{ document_name: string }[]>`SELECT document_name FROM filing_documents
+    WHERE filing_id = ${filing.id} AND content_hash IS NOT NULL AND local_path IS NOT NULL`;
+  const downloadedNames = new Set(downloaded.map((document) => document.document_name));
+  for (const entry of discovery.manifest.filter((candidate) => candidate.included && !downloadedNames.has(candidate.documentName))) {
+    const document = await sec.downloadFilingDocument(input, entry, discovery.indexResponse);
+    await queue.transaction(item, async (transaction) => {
+      await transaction`UPDATE filing_documents SET local_path = ${document.bodyPath}, content_type = ${document.contentType},
+        content_hash = ${document.contentHash}, byte_size = ${document.byteSize}, status = 'downloaded', stage = 'downloaded',
+        excluded_at = NULL, exclusion_reason = NULL, retryable = true, last_error = NULL, fetched_at = now(), updated_at = now()
+        WHERE filing_id = ${filing.id} AND document_name = ${entry.documentName}`;
+    });
+  }
+
+  await queue.transaction(item, async (transaction) => {
+    const parseDocuments = await transaction<{ id: number }[]>`SELECT id FROM filing_documents
+      WHERE filing_id = ${filing.id} AND stage = 'downloaded' AND content_hash IS NOT NULL ORDER BY id`;
+    await transaction`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
+    for (const document of parseDocuments) await queueParsing(transaction, item.job_id, item.company_id, filing.id, document.id);
   });
 }
 

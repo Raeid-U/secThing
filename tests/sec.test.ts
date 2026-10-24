@@ -104,4 +104,27 @@ describe("SEC identity and submissions client", () => {
     expect(acquired).toMatchObject({ documentName: "annual-report.htm", documentType: "primary_filing", url: `${directory}/annual-report.htm`, contentType: "text/html", byteSize: 39 });
     await expect((await import("node:fs/promises")).readFile(acquired.bodyPath, "utf8")).resolves.toBe("<html><body>Annual report</body></html>");
   });
+
+  it("discovers and classifies the complete manifest before transferring bodies", async () => {
+    const cik = 1286613;
+    const accessionNumber = "0001286613-25-000002";
+    const directory = filingArchiveDirectoryUrl(cik, accessionNumber);
+    const { dataDir } = await clientFor({});
+    const fetch = vi.fn(async (url: string | URL | Request) => String(url).endsWith("index.json")
+      ? new Response(JSON.stringify({ directory: { item: [
+        { name: "annual.htm", type: "10-K", size: "1200" },
+        { name: "contract.pdf", type: "EX-10.1", size: 900 },
+        { name: "issuer_cal.xml", type: "EX-101.CAL", size: 50 },
+      ] } }), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response("unexpected body request", { status: 500 }));
+    const client = new SecClient({ dataDir, userAgent: "secThing tests@example.com", rateLimitPerSecond: 10, fetch: fetch as typeof globalThis.fetch });
+    const discovery = await client.discoverFilingManifest({ cik, accessionNumber, formType: "10-K", primaryDocument: "annual.htm" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(`${directory}/index.json`, expect.any(Object));
+    expect(discovery.manifest).toMatchObject([
+      { documentName: "annual.htm", classification: "primary_filing", included: true, byteSize: 1200 },
+      { documentName: "contract.pdf", classification: "exhibit", included: true, byteSize: 900 },
+      { documentName: "issuer_cal.xml", classification: "structured_fact", included: false, exclusionReason: expect.any(String), byteSize: 50 },
+    ]);
+  });
 });

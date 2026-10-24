@@ -263,6 +263,14 @@ export class SecClient {
   }
 
   async acquireFilingDocuments(input: { cik: number; accessionNumber: string; formType: string; primaryDocument?: string }): Promise<{ manifest: FilingManifestEntry[]; documents: AcquiredFilingDocument[]; indexResponse: SecCachedResponse }> {
+    const discovery = await this.discoverFilingManifest(input);
+    const acquired: AcquiredFilingDocument[] = [];
+    for (const entry of discovery.manifest.filter((candidate) => candidate.included))
+      acquired.push(await this.downloadFilingDocument(input, entry, discovery.indexResponse));
+    return { manifest: discovery.manifest, documents: acquired, indexResponse: discovery.indexResponse };
+  }
+
+  async discoverFilingManifest(input: { cik: number; accessionNumber: string; formType: string; primaryDocument?: string }): Promise<{ manifest: FilingManifestEntry[]; indexResponse: SecCachedResponse }> {
     const directoryUrl = filingArchiveDirectoryUrl(input.cik, input.accessionNumber);
     const index = await this.fetchJson(`${directoryUrl}/index.json`);
     const root = index.body as Record<string, unknown>;
@@ -274,7 +282,8 @@ export class SecClient {
       if (!entry || typeof entry !== "object") return [];
       const item = entry as Record<string, unknown>;
       const name = safeDocumentName(asString(item.name));
-      return name ? [{ name, type: asString(item.type), size: typeof item.size === "number" ? item.size : undefined }] : [];
+      const rawSize = typeof item.size === "number" ? item.size : Number(asString(item.size));
+      return name ? [{ name, type: asString(item.type), size: Number.isFinite(rawSize) ? rawSize : undefined }] : [];
     });
     const preferred = safeDocumentName(input.primaryDocument);
     const documentName = preferred && documents.some((document) => document.name === preferred)
@@ -285,15 +294,17 @@ export class SecClient {
       ...classifyFilingDocument({ name: document.name, secType: document.type, primaryDocument: documentName, formType: input.formType }),
       byteSize: document.size,
     }));
-    const acquired: AcquiredFilingDocument[] = [];
-    for (const entry of manifest.filter((candidate) => candidate.included)) {
-      const url = `${directoryUrl}/${encodeURIComponent(entry.documentName)}`;
-      const document = await this.fetchText(url, join("sec", "filings", String(input.cik), input.accessionNumber.replaceAll("-", "")), "text/html, text/plain, application/xhtml+xml, application/pdf, */*");
-      acquired.push({ documentName: entry.documentName, documentType: entry.classification as "primary_filing" | "exhibit", url,
-        contentType: document.cache.contentType, bodyPath: document.cache.bodyPath, contentHash: document.cache.contentHash,
-        byteSize: document.byteSize, indexResponse: index.cache });
-    }
-    return { manifest, documents: acquired, indexResponse: index.cache };
+    return { manifest, indexResponse: index.cache };
+  }
+
+  async downloadFilingDocument(input: { cik: number; accessionNumber: string }, entry: FilingManifestEntry, indexResponse: SecCachedResponse): Promise<AcquiredFilingDocument> {
+    if (!entry.included || (entry.classification !== "primary_filing" && entry.classification !== "exhibit"))
+      throw new Error(`Filing document ${entry.documentName} is not classified as downloadable evidence.`);
+    const url = `${filingArchiveDirectoryUrl(input.cik, input.accessionNumber)}/${encodeURIComponent(entry.documentName)}`;
+    const document = await this.fetchText(url, join("sec", "filings", String(input.cik), input.accessionNumber.replaceAll("-", "")), "text/html, text/plain, application/xhtml+xml, application/pdf, */*");
+    return { documentName: entry.documentName, documentType: entry.classification, url,
+      contentType: document.cache.contentType, bodyPath: document.cache.bodyPath, contentHash: document.cache.contentHash,
+      byteSize: document.byteSize, indexResponse };
   }
 
   private async fetchJson(url: string): Promise<{ body: unknown; cache: SecCachedResponse }> {
