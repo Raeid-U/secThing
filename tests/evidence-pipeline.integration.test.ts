@@ -18,6 +18,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
   let dataDir: string;
   let item: { job_id: number; company_id: number; filing_id: number; document_id: number };
   let app: ReturnType<typeof buildServer>;
+  let questionApp: ReturnType<typeof buildServer>;
 
   beforeAll(async () => {
     await admin.begin(async (tx) => {
@@ -28,10 +29,17 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await applyMigrations(sql);
     dataDir = await mkdtemp(join(tmpdir(), "secthing-evidence-test-"));
     app = buildServer(loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, SEC_USER_AGENT: "secThing test test@example.com" }));
+    questionApp = buildServer(loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, SEC_USER_AGENT: "secThing test test@example.com",
+      AI_MODE: "local", AI_CHAT_PROVIDER: "ollama", AI_CHAT_BASE_URL: "http://fixture", AI_CHAT_MODEL: "fixture-chat",
+      AI_EMBEDDING_PROVIDER: "ollama", AI_EMBEDDING_BASE_URL: "http://fixture", AI_EMBEDDING_MODEL: "fixture-embed", AI_EMBEDDING_DIMENSION: "2" }), {
+      embeddings: { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) },
+      chat: { chat: async (request) => ({ model: request.model, content: JSON.stringify({ findings: [{ statement: "Orchard revenue grew.", citations: ["C1"] }], interpretation: [], limitations: [] }) }) },
+    });
   }, 30_000);
 
   afterAll(async () => {
     await app?.close();
+    await questionApp?.close();
     await sql.end();
     await admin.unsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.end();
@@ -275,6 +283,25 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await expect(retrieval.search(item.company_id, "orchard", "semantic", { limit: 10 })).rejects.toThrow();
   });
 
+  it("blocks questions until corpus readiness, then audits a citation-safe grounded answer", async () => {
+    await parseAndIndex();
+    const init = post({ question: "What happened to orchard revenue?" });
+    const blocked = await questionApp.inject({ method: "POST", url: `/api/v1/companies/${item.company_id}/questions`,
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toMatchObject({ corpus: { readiness: "processing" } });
+    await sql`INSERT INTO companyfacts_sources (company_id, sec_url, body_path, content_hash) VALUES
+      (${item.company_id}, 'https://data.sec.gov/companyfacts.json', '/fixture/companyfacts.json', 'fixture-facts')`;
+    await semantic(undefined, { AI_EMBEDDING_DIMENSION: "2" }).embedDocument(item.document_id);
+    const corpus = await questionApp.inject({ url: `/api/v1/companies/${item.company_id}/corpus` });
+    expect(corpus.json()).toMatchObject({ readiness: "ready", structuredFactsComplete: true, stageCounts: { embedded: 1 } });
+    const answered = await questionApp.inject({ method: "POST", url: `/api/v1/companies/${item.company_id}/questions`,
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });
+    expect(answered.statusCode).toBe(200);
+    expect(answered.json()).toMatchObject({ status: "answered", findings: [{ citations: ["C1"] }], citations: [{ label: "C1", locator: { normalizedDocumentId: expect.any(String) } }], modelRunId: expect.any(String) });
+    expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "valid", cited_source_ids: ["C1"] }]);
+  });
+
   it("rejects incompatible/nonfinite/zero vectors without persisting them", async () => {
     await parseAndIndex();
     for (const vector of [[1, 2, 3], [NaN, 1], [0, 0]]) {
@@ -284,16 +311,18 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(0);
   });
 
-  it("invalidates vectors on reparse and does not reuse a different model profile", async () => {
+  it("retires vectors from active retrieval without deleting old generations or reusing another profile", async () => {
     await parseAndIndex();
     const retrieval = semantic();
     await retrieval.embedDocument(item.document_id);
     expect((await semantic(undefined, { AI_EMBEDDING_MODEL: "different-embed" }).status(item.company_id)).embedded).toBe(0);
     await source("Cobalt demand rose.");
     await parseAndIndex();
-    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(0);
+    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(1);
+    expect((await retrieval.status(item.company_id)).embedded).toBe(0);
     await retrieval.embedDocument(item.document_id);
     expect((await retrieval.status(item.company_id)).embedded).toBe(1);
+    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(2);
   });
 
   it("does not persist an in-flight embedding against a retired chunk generation", async () => {

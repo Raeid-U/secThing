@@ -61,7 +61,7 @@ export class GroundedAnswer {
         const response = await this.provider.chat({ model: this.config.aiChatModel, messages: [
           { role: "system", content: system },
           { role: "user", content: attempt === 0 ? payload : `${payload}\nYour previous response was invalid (${validationError}). Return corrected JSON only.` },
-        ], temperature: 0, responseFormat: "json" });
+        ], temperature: 0, responseFormat: "json", maxOutputTokens: outputTokens });
         raw = response.content;
         answer = validateStructuredAnswer(parseJson(raw), new Set(evidence.sources.map((source) => source.label)));
         break;

@@ -18,6 +18,8 @@ import {
   loadConfig,
   type PlatformConfig,
   verifyAiChat,
+  type ChatProvider,
+  type EmbeddingProvider,
 } from "@secthing/platform";
 
 function isoDate(value: string | Date | null): string | undefined {
@@ -27,12 +29,12 @@ function isoDate(value: string | Date | null): string | undefined {
     : value.toISOString().slice(0, 10);
 }
 
-export function buildServer(config: PlatformConfig = loadConfig()) {
+export function buildServer(config: PlatformConfig = loadConfig(), providers: { chat?: ChatProvider; embeddings?: EmbeddingProvider } = {}) {
   const app = Fastify({ logger: true });
   const sql = connectDatabase(config.databaseUrl);
-  const retrieval = new Retrieval(sql, config);
+  const retrieval = new Retrieval(sql, config, providers.embeddings);
   const corpus = new CorpusCatalog(sql, config, retrieval);
-  const groundedAnswer = new GroundedAnswer(sql, config, undefined, retrieval);
+  const groundedAnswer = new GroundedAnswer(sql, config, providers.chat, retrieval);
   app.register(cors, { origin: true });
   app.addHook("onClose", async () => sql.end({ timeout: 5 }));
 
