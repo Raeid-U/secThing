@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AddCompany } from "./research/add-company";
+import { AskFilings } from "./research/ask-filings";
 import { CompanyLibrary, LibraryHome } from "./research/company-library";
 import { DocumentReader } from "./research/document-reader";
 import { useWorkspace } from "./research/use-workspace";
@@ -13,6 +14,7 @@ import {
   post,
   request,
   type Filing,
+  type AnswerCitation,
   type Hit,
 } from "./research/types";
 
@@ -112,6 +114,7 @@ export function CompanyWorkbench() {
     navigate({
       filing: String(filing.id),
       document: "",
+      generation: "",
       hash: "",
       start: "",
       end: "",
@@ -125,7 +128,15 @@ export function CompanyWorkbench() {
       hash: hit.text_hash,
       start: String(hit.start_offset),
       end: String(hit.end_offset),
+      generation: String(hit.normalized_document_id),
     });
+    setLibrary(false);
+  }
+  function openCitation(citation: AnswerCitation) {
+    const locator = citation.locator;
+    if (!locator.filingId || !locator.documentId || !locator.normalizedDocumentId) return;
+    navigate({ filing: String(locator.filingId), document: String(locator.documentId), generation: String(locator.normalizedDocumentId),
+      hash: locator.textHash ?? "", start: String(locator.startOffset ?? ""), end: String(locator.endOffset ?? "") });
     setLibrary(false);
   }
   function nextHit(direction: number) {
@@ -249,6 +260,7 @@ export function CompanyWorkbench() {
                 navigate({
                   q: query.trim(),
                   filing: "",
+                  generation: "",
                   hash: "",
                   start: "",
                   end: "",
@@ -293,6 +305,7 @@ export function CompanyWorkbench() {
                     navigate({
                       q: "",
                       filing: "",
+                      generation: "",
                       hash: "",
                       start: "",
                       end: "",
@@ -394,6 +407,7 @@ export function CompanyWorkbench() {
                 </button>
               </div>
             )}
+            <AskFilings companyId={location.company} onOpenCitation={openCitation} />
             <div className="evidence-layout">
               <section
                 className="results-panel"
@@ -411,7 +425,7 @@ export function CompanyWorkbench() {
                   {location.filing && (
                     <button
                       onClick={() =>
-                        navigate({ filing: "", hash: "", start: "", end: "" })
+                        navigate({ filing: "", generation: "", hash: "", start: "", end: "" })
                       }
                     >
                       Expand list
@@ -543,7 +557,7 @@ export function CompanyWorkbench() {
                   start={location.start ? Number(location.start) : undefined}
                   end={location.end ? Number(location.end) : undefined}
                   onClose={() =>
-                    navigate({ filing: "", hash: "", start: "", end: "" })
+                    navigate({ filing: "", generation: "", hash: "", start: "", end: "" })
                   }
                   onNext={nextHit}
                   hasHits={hits.length > 0}

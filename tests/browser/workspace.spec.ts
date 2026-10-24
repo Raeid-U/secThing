@@ -31,6 +31,7 @@ const hit = {
   chunk_id: "1",
   filing_id: "1",
   document_id: "1",
+  normalized_document_id: "1",
   text_hash: "fixture-hash",
   start_offset: 18,
   end_offset: 74,
@@ -78,6 +79,16 @@ async function fixture(page: Page) {
       body = { outcome: "refresh_queued", companyId: "1", jobId: "1" };
     else if (url.pathname === "/api/v1/companies") body = [company];
     else if (url.pathname.endsWith("/search/reindex")) body = { queued: 0 };
+    else if (url.pathname.endsWith("/corpus")) body = {
+      readiness: "ready", stageCounts: { embedded: 50 }, structuredFactsComplete: true,
+      exclusions: [], failures: [], coverage: { earliestFilingDate: "2023-01-01", latestFilingDate: "2026-01-01", supportedFilings: 50, missingManifests: 0 }, externalEmbeddingEstimate: null,
+    };
+    else if (url.pathname.endsWith("/questions")) body = {
+      status: "answered", findings: [{ statement: "Northstar provides cloud software to regulated industries.", citations: ["C1"] }],
+      interpretation: [{ statement: "The filing presents regulated industries as a core market.", citations: ["C1"] }], limitations: [],
+      citations: [{ label: "C1", kind: "chunk", text: hit.chunk_text, locator: { filingId: "1", documentId: "1", normalizedDocumentId: "1", textHash: "fixture-hash", startOffset: 18, endOffset: 74, formType: "10-K", accessionNumber: filings[0].accession_number } }],
+      coverage: {}, modelRunId: "1", externalDisclosure: null,
+    };
     else if (url.pathname.endsWith("/search"))
       body = {
         results: [hit],
@@ -217,6 +228,18 @@ test("fixed frame, source comparison, passage navigation and retained search", a
   await expect(
     page.getByRole("region", { name: "Document inspection" }),
   ).toBeVisible();
+});
+
+test("asks a grounded question and opens its exact cited generation", async ({ page }) => {
+  await page.goto("/records?company=1");
+  await expect(page.getByText("Answers use only this company’s indexed SEC evidence.")).toBeVisible();
+  await page.getByLabel("Question").fill("What market does Northstar serve?");
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What the filings show" })).toBeVisible();
+  await expect(page.getByText("Northstar provides cloud software to regulated industries.")).toBeVisible();
+  await page.getByRole("button", { name: new RegExp(`C1.*10-K`) }).click();
+  await expect(page).toHaveURL(/generation=1/);
+  await expect(page.getByText("Extracted evidence", { exact: true })).toBeVisible();
 });
 
 test("guided intake resolves identity, confirms scope, and restores focus", async ({
