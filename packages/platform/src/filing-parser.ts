@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const filingParserVersion = "html-text-v2";
+export const filingParserVersion = "filing-text-v3";
 
 export type ParsedFilingSection = {
   sectionType: string;
@@ -29,7 +29,7 @@ export function pageRangeForOffsets(pages: ParsedFiling["pages"], startOffset: n
 
 async function extractPdf(buffer: Buffer) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const document = await pdfjs.getDocument({ data: new Uint8Array(buffer), useWorkerFetch: false }).promise;
+  const document = await pdfjs.getDocument({ data: new Uint8Array(buffer), useWorkerFetch: false, useSystemFonts: true }).promise;
   const parts: string[] = [];
   const pages: ParsedFiling["pages"] = [];
   let offset = 0;

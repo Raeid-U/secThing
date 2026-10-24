@@ -7,6 +7,29 @@ import { FilingParser, detectFilingSections, normalizeFilingText, pageRangeForOf
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
+function pdfFixture(pageTexts: string[]) {
+  const pageIds = pageTexts.map((_, index) => 3 + index * 2);
+  const fontId = 3 + pageTexts.length * 2;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageTexts.length} >>`,
+    ...pageTexts.flatMap((text, index) => {
+      const pageId = pageIds[index];
+      const contentId = pageId + 1;
+      const stream = `BT /F1 12 Tf 72 720 Td (${text.replace(/[()\\]/g, "\\$&")}) Tj ET`;
+      return [`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+        `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`];
+    }),
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let body = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(body)); body += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = Buffer.byteLength(body);
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `).join("\n")}\n`;
+  return Buffer.from(`${body}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+}
+
 describe("FilingParser", () => {
   it("normalizes HTML into stable readable text and detects form-aware sections", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "secthing-parser-test-"));
@@ -60,5 +83,20 @@ describe("FilingParser", () => {
     expect(pageRangeForOffsets(pages, 25, 45)).toEqual({ pageStart: 2, pageEnd: 2 });
     expect(pageRangeForOffsets(pages, 18, 60)).toEqual({ pageStart: 1, pageEnd: 3 });
     expect(pageRangeForOffsets(pages, 20, 23)).toEqual({});
+  });
+
+  it("extracts PDF text with one-based page provenance", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "secthing-pdf-test-"));
+    directories.push(dataDir);
+    const sourcePath = join(dataDir, "filing.pdf");
+    await writeFile(sourcePath, pdfFixture(["Item 1. Business Page One", "Item 1A. Risk Factors Page Two"]));
+    const parsed = await new FilingParser().parse({ sourcePath, contentType: "application/pdf", formType: "10-K", dataDir });
+    expect(parsed.text).toContain("Item 1. Business Page One");
+    expect(parsed.text).toContain("Item 1A. Risk Factors Page Two");
+    expect(parsed.pages).toEqual([
+      { pageNumber: 1, startOffset: 0, endOffset: "Item 1. Business Page One".length },
+      { pageNumber: 2, startOffset: "Item 1. Business Page One".length + 3, endOffset: parsed.text.length },
+    ]);
+    expect(pageRangeForOffsets(parsed.pages, parsed.text.indexOf("Risk Factors"), parsed.text.length)).toEqual({ pageStart: 2, pageEnd: 2 });
   });
 });
