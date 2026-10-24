@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import {
   Retrieval,
+  CorpusCatalog,
   chunkingProfileVersion,
   assessReadiness,
   backfillSearchIndex,
@@ -29,6 +30,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
   const app = Fastify({ logger: true });
   const sql = connectDatabase(config.databaseUrl);
   const retrieval = new Retrieval(sql, config);
+  const corpus = new CorpusCatalog(sql, config, retrieval);
   app.register(cors, { origin: true });
   app.addHook("onClose", async () => sql.end({ timeout: 5 }));
 
@@ -325,6 +327,32 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
             error instanceof Error ? error.message : "Search is unavailable.",
         });
     }
+  });
+
+  app.get("/api/v1/companies/:companyId/corpus", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    if (!id.success) return reply.code(400).send({ error: "Company id must be a positive integer." });
+    if (!(await sql`SELECT id FROM companies WHERE id = ${id.data}`)[0]) return reply.code(404).send({ error: "Company not found." });
+    return { ...(await corpus.status(id.data)), externalEmbeddingEstimate: config.aiMode === "external" ? await corpus.embeddingEstimate(id.data) : null };
+  });
+
+  app.post("/api/v1/companies/:companyId/corpus/retry", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ documentIds: z.array(z.coerce.number().int().positive()).max(100).optional() }).safeParse(request.body ?? {});
+    if (!id.success || !body.success) return reply.code(400).send({ error: "Valid company and optional document ids are required." });
+    const result = await corpus.retry(id.data, body.data.documentIds);
+    return reply.code(result.queued ? 202 : 200).send(result);
+  });
+
+  app.post("/api/v1/companies/:companyId/embeddings/approve", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ corpusFingerprint: z.string().min(1), profileKey: z.string().min(1) }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "The current corpus fingerprint and profile key are required." });
+    if (config.aiMode !== "external") return reply.code(409).send({ error: "Approval is only required for external embeddings." });
+    const approved = await corpus.approveEmbeddings(id.data, body.data.corpusFingerprint, body.data.profileKey);
+    if (!approved) return reply.code(409).send({ error: "The estimate is stale. Refresh corpus status before approving." });
+    const queued = await retrieval.queue(id.data, true);
+    return reply.code(202).send({ approved, ...queued });
   });
 
   app.post(

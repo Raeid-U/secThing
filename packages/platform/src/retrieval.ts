@@ -106,6 +106,17 @@ export class Retrieval {
     const settings = embeddingSettings(this.config);
     if (!settings) return { queued: 0 };
     const profile = await this.profile();
+    if (this.config.aiMode === "external") {
+      if (!companyId) return { queued: 0, approvalRequired: true };
+      const corpus = await this.sql<{ fingerprint: string | null }[]>`
+        SELECT md5(string_agg(c.id::text || ':' || c.chunk_hash, ',' ORDER BY c.id)) AS fingerprint
+        FROM chunks c JOIN normalized_documents n ON n.id = c.normalized_document_id
+        WHERE c.company_id = ${companyId} AND n.status = 'parsed'`;
+      const approved = corpus[0].fingerprint && (await this.sql`
+        SELECT id FROM embedding_approvals WHERE company_id = ${companyId} AND profile_key = ${settings.key}
+          AND corpus_fingerprint = ${corpus[0].fingerprint} AND approved_at IS NOT NULL`)[0];
+      if (!approved) return { queued: 0, approvalRequired: true };
+    }
     return this.sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(289462262)`;
       const documents = await tx<
@@ -193,7 +204,10 @@ export class Retrieval {
           AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = c.id AND e.profile_id = ${profile.id} AND e.chunk_hash = c.chunk_hash)
         ORDER BY c.id LIMIT 16
       `;
-      if (!chunks.length) return;
+      if (!chunks.length) {
+        await this.sql`UPDATE filing_documents SET stage = 'embedded', updated_at = now() WHERE id = ${documentId}`;
+        return;
+      }
       const vectors = await this.vectors(
         chunks.map((chunk) => chunk.chunk_text),
         profile,

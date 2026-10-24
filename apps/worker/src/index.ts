@@ -377,6 +377,11 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
       WHERE id = ${item.id}
     `;
     await sql`UPDATE jobs SET status = ${retry ? "running" : "partial"}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
+    if (!retry && item.document_id) {
+      await sql`UPDATE filing_documents SET status = 'excluded', stage = 'excluded', attempt_count = ${item.attempt_count},
+        excluded_at = now(), exclusion_reason = ${message}, retryable = true, last_error = ${message}, updated_at = now()
+        WHERE id = ${item.document_id}`;
+    }
   });
   console.error(
     JSON.stringify({
