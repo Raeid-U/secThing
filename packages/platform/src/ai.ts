@@ -4,7 +4,7 @@ type FetchLike = typeof fetch;
 
 export type AiModel = { name: string; sizeBytes?: number; modifiedAt?: string };
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
-export type ChatRequest = { model: string; messages: ChatMessage[]; temperature?: number };
+export type ChatRequest = { model: string; messages: ChatMessage[]; temperature?: number; responseFormat?: "json"; maxOutputTokens?: number };
 export type ChatResponse = { model: string; content: string; totalDurationNs?: number };
 export type EmbeddingRequest = { model: string; inputs: string[] };
 export type EmbeddingResponse = { model: string; embeddings: number[][] };
@@ -54,7 +54,7 @@ export class OllamaClient implements ChatProvider, EmbeddingProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const body = await this.request("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ model: request.model, messages: request.messages, stream: false, options: request.temperature === undefined ? undefined : { temperature: request.temperature } }),
+      body: JSON.stringify({ model: request.model, messages: request.messages, stream: false, format: request.responseFormat === "json" ? "json" : undefined, options: request.temperature === undefined ? undefined : { temperature: request.temperature } }),
     });
     const response = body as Record<string, unknown>;
     const message = response.message;
@@ -89,6 +89,37 @@ export class OllamaClient implements ChatProvider, EmbeddingProvider {
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+export class OpenAiCompatibleClient implements ChatProvider, EmbeddingProvider {
+  constructor(private readonly options: { baseUrl: string; apiKey?: string; timeoutMs: number; fetch?: FetchLike }) {}
+  private async request(path: string, body: unknown) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    try {
+      const response = await (this.options.fetch ?? fetch)(new URL(path, this.options.baseUrl), { method: "POST", signal: controller.signal,
+        headers: { Accept: "application/json", "Content-Type": "application/json", ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}) }, body: JSON.stringify(body) });
+      const text = await response.text();
+      if (!response.ok) throw new Error(`OpenAI-compatible request failed (${response.status}): ${text.slice(0, 240)}`);
+      return JSON.parse(text) as Record<string, unknown>;
+    } finally { clearTimeout(timeout); }
+  }
+  async chat(request: ChatRequest): Promise<ChatResponse> {
+    const body = await this.request("/v1/chat/completions", { model: request.model, messages: request.messages, temperature: request.temperature,
+      max_tokens: request.maxOutputTokens, response_format: request.responseFormat === "json" ? { type: "json_object" } : undefined });
+    const choices = body.choices as Array<{ message?: { content?: unknown } }> | undefined;
+    const content = choices?.[0]?.message?.content;
+    if (typeof content !== "string") throw new Error("OpenAI-compatible endpoint returned no message content.");
+    return { model: typeof body.model === "string" ? body.model : request.model, content };
+  }
+  async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
+    const body = await this.request("/v1/embeddings", { model: request.model, input: request.inputs });
+    const data = body.data as Array<{ index?: number; embedding?: unknown }> | undefined;
+    const embeddings = (data ?? []).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map((entry) => entry.embedding)
+      .filter((entry): entry is number[] => Array.isArray(entry) && entry.every((value) => typeof value === "number" && Number.isFinite(value)));
+    if (embeddings.length !== request.inputs.length) throw new Error("OpenAI-compatible endpoint returned an unexpected embedding response.");
+    return { model: typeof body.model === "string" ? body.model : request.model, embeddings };
   }
 }
 

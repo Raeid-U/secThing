@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
-import { OllamaClient, type EmbeddingProvider } from "./ai.js";
+import { OllamaClient, OpenAiCompatibleClient, type EmbeddingProvider } from "./ai.js";
 import type { PlatformConfig } from "./config.js";
 import { chunkingProfileVersion } from "./chunking.js";
 import { filingParserVersion } from "./filing-parser.js";
@@ -14,14 +14,29 @@ export type SearchFilters = {
   limit: number;
 };
 type Profile = { id: number; dimension: number | null };
-type Hit = { chunk_id: string; rank: number; [key: string]: unknown };
+export type SearchHit = { chunk_id: string; rank: number; chunk_text: string; filing_id: string; document_id: string; normalized_document_id: string; source_span_id: string; form_type: string; filing_date: string; accession_number: string; section_type: string; section_label: string; start_offset: number; end_offset: number; text_hash: string; [key: string]: unknown };
+type Hit = SearchHit;
+export type QueryAnalysis = { formTypes: string[]; filedAfter?: string; filedBefore?: string; metrics: string[]; comparison: boolean; numeric: boolean };
+export type EvidenceSource = { label: string; kind: "chunk" | "financial_fact"; sourceId: string; text: string; tokenEstimate: number; locator: Record<string, unknown> };
+export type EvidencePackage = { question: string; analysis: QueryAnalysis; sources: EvidenceSource[]; tokens: { budget: number; used: number; reservedOutput: number }; generationIds: string[]; coverage: Record<string, unknown> };
+
+const METRIC_ALIASES: Record<string, string[]> = { revenue: ["revenue", "sales"], net_income: ["net income", "profit", "loss"], assets: ["assets"], liabilities: ["liabilities"], cash: ["cash"], operating_cash_flow: ["operating cash flow", "cash from operations"], debt: ["debt", "borrowings"], shares: ["shares outstanding"], eps: ["eps", "earnings per share"] };
+export function analyzeQuestion(question: string): QueryAnalysis {
+  const lower = question.toLowerCase();
+  const years = [...lower.matchAll(/\b(19|20)\d{2}\b/g)].map((match) => Number(match[0]));
+  const forms = [...new Set([...lower.matchAll(/\b(10-k|10-q|8-k)(?:\/a)?\b/g)].map((match) => match[0].toUpperCase()))];
+  const metrics = Object.entries(METRIC_ALIASES).filter(([, aliases]) => aliases.some((alias) => lower.includes(alias))).map(([metric]) => metric);
+  return { formTypes: forms, ...(years.length ? { filedAfter: `${Math.min(...years)}-01-01`, filedBefore: `${Math.max(...years)}-12-31` } : {}), metrics,
+    comparison: /\b(change|changed|compare|versus|vs\.?|trend|over time|between)\b/.test(lower) || years.length > 1,
+    numeric: metrics.length > 0 || /\b(how much|amount|percent|percentage|ratio)\b/.test(lower) };
+}
 
 export function embeddingSettings(config: PlatformConfig) {
   if (
     config.aiMode === "disabled" ||
     !config.aiEmbeddingBaseUrl ||
     !config.aiEmbeddingModel ||
-    config.aiEmbeddingProvider !== "ollama"
+    !["ollama", "openai_compatible"].includes(config.aiEmbeddingProvider ?? "")
   )
     return null;
   if (config.localOnly && config.aiMode === "external") return null;
@@ -49,11 +64,13 @@ export class Retrieval {
   ) {
     this.provider =
       provider ??
-      new OllamaClient({
+      (config.aiEmbeddingProvider === "openai_compatible" ? new OpenAiCompatibleClient({
+        baseUrl: config.aiEmbeddingBaseUrl ?? "http://localhost:11434", apiKey: config.aiEmbeddingApiKey, timeoutMs: config.aiRequestTimeoutMs,
+      }) : new OllamaClient({
         baseUrl: config.aiEmbeddingBaseUrl ?? "http://localhost:11434",
         apiKey: config.aiEmbeddingApiKey,
         timeoutMs: config.aiRequestTimeoutMs,
-      });
+      }));
   }
 
   private async profile(): Promise<Profile> {
@@ -62,7 +79,7 @@ export class Retrieval {
       throw new Error("Meaning search needs a configured embedding model.");
     const profiles = await this.sql<Profile[]>`
       INSERT INTO embedding_profiles (profile_key, provider, model, dimension)
-      VALUES (${settings.key}, 'ollama', ${settings.model}, ${this.config.aiEmbeddingDimension ?? null})
+      VALUES (${settings.key}, ${this.config.aiEmbeddingProvider ?? "ollama"}, ${settings.model}, ${this.config.aiEmbeddingDimension ?? null})
       ON CONFLICT (profile_key) DO UPDATE SET profile_key = EXCLUDED.profile_key RETURNING id, dimension
     `;
     return profiles[0];
@@ -301,5 +318,38 @@ export class Retrieval {
       fallback,
       results: results.slice(0, filters.limit),
     };
+  }
+
+  async evidencePackage(companyId: number, question: string, options: { maxInputTokens: number; reservedOutputTokens?: number }): Promise<EvidencePackage> {
+    const analysis = analyzeQuestion(question);
+    const search = await this.search(companyId, question, "hybrid", { limit: 36, formType: analysis.formTypes.length === 1 ? analysis.formTypes[0] : undefined,
+      filedAfter: analysis.filedAfter, filedBefore: analysis.filedBefore });
+    const selected: SearchHit[] = [];
+    const perFiling = new Map<string, number>();
+    for (const hit of search.results as SearchHit[]) {
+      const count = perFiling.get(String(hit.filing_id)) ?? 0;
+      if (analysis.comparison && count >= 2) continue;
+      selected.push(hit); perFiling.set(String(hit.filing_id), count + 1);
+    }
+    const facts = analysis.metrics.length ? await this.sql<{ id: string; metric: string; taxonomy: string; concept: string; unit: string; value: string; period_start: string | null; period_end: string | null; instant_date: string | null; fiscal_year: number | null; fiscal_period: string | null; form_type: string | null; accession_number: string | null; conflict_status: string }[]>`
+      SELECT id, metric, taxonomy, concept, unit, value::text, period_start::text, period_end::text, instant_date::text,
+        fiscal_year, fiscal_period, form_type, accession_number, conflict_status FROM financial_facts
+      WHERE company_id = ${companyId} AND metric = ANY(${analysis.metrics}::text[])
+      ORDER BY COALESCE(period_end, instant_date) DESC, conflict_status = 'selected' DESC LIMIT 20` : [];
+    const candidates: EvidenceSource[] = [
+      ...facts.map((fact, index) => ({ label: `F${index + 1}`, kind: "financial_fact" as const, sourceId: `financial_fact:${fact.id}`,
+        text: `${fact.metric}: ${fact.value} ${fact.unit}; period ${fact.period_start ? `${fact.period_start} to ${fact.period_end}` : fact.instant_date}; ${fact.form_type ?? "unknown form"}; status ${fact.conflict_status}.`, tokenEstimate: 32,
+        locator: { financialFactId: fact.id, accessionNumber: fact.accession_number, formType: fact.form_type, taxonomy: fact.taxonomy, concept: fact.concept } })),
+      ...selected.map((hit, index) => ({ label: `C${index + 1}`, kind: "chunk" as const, sourceId: `chunk:${hit.chunk_id}`, text: hit.chunk_text,
+        tokenEstimate: Math.max(1, Math.ceil(hit.chunk_text.length / 4)), locator: { chunkId: hit.chunk_id, filingId: hit.filing_id, documentId: hit.document_id,
+          normalizedDocumentId: hit.normalized_document_id, sourceSpanId: hit.source_span_id, accessionNumber: hit.accession_number, formType: hit.form_type,
+          filingDate: hit.filing_date, sectionType: hit.section_type, sectionLabel: hit.section_label, startOffset: hit.start_offset, endOffset: hit.end_offset, textHash: hit.text_hash } })),
+    ];
+    const sources: EvidenceSource[] = [];
+    let used = 0;
+    for (const source of candidates) { if (used + source.tokenEstimate > options.maxInputTokens) continue; sources.push(source); used += source.tokenEstimate; }
+    const generations = [...new Set(sources.flatMap((source) => source.kind === "chunk" ? [String(source.locator.normalizedDocumentId)] : []))];
+    return { question, analysis, sources, tokens: { budget: options.maxInputTokens, used, reservedOutput: options.reservedOutputTokens ?? this.config.aiChatMaxOutputTokens ?? 1_024 },
+      generationIds: generations, coverage: { retrievalMode: search.mode, fallback: search.fallback, sourceCount: sources.length, financialFactCount: facts.length } };
   }
 }
