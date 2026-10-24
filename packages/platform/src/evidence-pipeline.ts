@@ -94,18 +94,12 @@ export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "
     await transaction`SELECT id FROM filing_documents WHERE id = ${document.id} FOR UPDATE`;
     const current = await transaction<{ content_hash: string }[]>`SELECT content_hash FROM filing_documents WHERE id = ${document.id}`;
     if (current[0].content_hash !== document.content_hash) throw new Error("Source changed during parsing; retry with the current source.");
-    // Sections are document-wide. Invalidate every prior parse before replacing them.
-    await transaction`DELETE FROM chunks WHERE document_id = ${document.id}`;
-    await transaction`DELETE FROM filing_sections WHERE document_id = ${document.id}`;
-    await transaction`DELETE FROM source_spans WHERE normalized_document_id IN (SELECT id FROM normalized_documents WHERE document_id = ${document.id})`;
+    // Retain prior generations: completed answers may still cite their spans.
     await transaction`UPDATE normalized_documents SET status = 'superseded', updated_at = now() WHERE document_id = ${document.id}`;
     const normalized = await transaction<{ id: number }[]>`
-      INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, warnings)
-      VALUES (${document.id}, ${filingParserVersion}, ${document.content_hash}, ${parsed.normalizedTextPath}, ${parsed.textHash}, ${parsed.textLength}, 'parsed', ${transaction.json(parsed.warnings)})
-      ON CONFLICT (document_id, parser_version) DO UPDATE SET
-        source_content_hash = EXCLUDED.source_content_hash, normalized_text_path = EXCLUDED.normalized_text_path,
-        text_hash = EXCLUDED.text_hash, text_length = EXCLUDED.text_length, status = 'parsed', warnings = EXCLUDED.warnings,
-        parsed_at = now(), updated_at = now()
+      INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, warnings, generation)
+      SELECT ${document.id}, ${filingParserVersion}, ${document.content_hash}, ${parsed.normalizedTextPath}, ${parsed.textHash}, ${parsed.textLength}, 'parsed', ${transaction.json(parsed.warnings)},
+        COALESCE(max(generation), 0) + 1 FROM normalized_documents WHERE document_id = ${document.id}
       RETURNING id
     `;
     const normalizedDocumentId = normalized[0].id;
@@ -132,6 +126,7 @@ export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "
       }
     }
     await transaction`UPDATE filings SET filing_status = 'parsed', updated_at = now() WHERE id = ${document.filing_id}`;
+    await transaction`UPDATE filing_documents SET stage = 'parsed', updated_at = now() WHERE id = ${document.id}`;
     await queueChunking(transaction, item.job_id, item.company_id, document.filing_id, document.id);
   });
 }
@@ -213,7 +208,7 @@ export async function chunkDocument(sql: Sql, item: EvidenceWork, assertOwnershi
       `;
     }
     await transaction`UPDATE filings SET filing_status = 'chunked', updated_at = now() WHERE id = ${document.filing_id}`;
+    await transaction`UPDATE filing_documents SET stage = 'chunked', updated_at = now() WHERE id = ${document.document_id}`;
   });
 }
-
 
