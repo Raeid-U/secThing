@@ -11,4 +11,4 @@ export { Retrieval, analyzeQuestion, embeddingSettings, type EvidencePackage, ty
 export { CorpusCatalog } from "./corpus.js";
 export { FINANCIAL_CONCEPTS, normalizeCompanyFacts, persistCompanyFacts, type NormalizedFinancialFact } from "./financial-facts.js";
 export { GroundedAnswer, answerPromptVersion, answerSchemaVersion, validateStructuredAnswer, type SourcedStatement, type StructuredAnswer } from "./grounded-answer.js";
-export { WorkQueue, LeaseLostError, type ClaimedWork } from "./work-queue.js";
+export { WorkQueue, LeaseLostError, excludeTerminalDocument, type ClaimedWork } from "./work-queue.js";

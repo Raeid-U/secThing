@@ -4,6 +4,7 @@ import {
   Retrieval,
   WorkQueue,
   LeaseLostError,
+  excludeTerminalDocument,
   type ClaimedWork,
   backfillSearchIndex,
   chunkDocument,
@@ -393,21 +394,7 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
       WHERE id = ${item.id}
     `;
     await sql`UPDATE jobs SET status = ${retry ? "running" : "partial"}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
-    if (!retry && item.document_id) {
-      await sql`UPDATE filing_documents SET status = 'excluded', stage = 'excluded', attempt_count = ${item.attempt_count},
-        excluded_at = now(), exclusion_reason = ${message}, retryable = true, last_error = ${message}, updated_at = now()
-        WHERE id = ${item.document_id}`;
-    } else if (!retry && item.work_type === "acquire_filing_source" && item.filing_id) {
-      await sql`INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, status, stage, attempt_count,
-        excluded_at, exclusion_reason, retryable, last_error)
-        SELECT id, '__manifest__', 'manifest_failure',
-          ${`https://www.sec.gov/Archives/edgar/data/` } || cik::text || '/' || replace(accession_number, '-', '') || '/index.json',
-          'excluded', 'excluded', ${item.attempt_count}, now(), ${message}, true, ${message}
-        FROM filings WHERE id = ${item.filing_id}
-        ON CONFLICT (filing_id, document_name) DO UPDATE SET status = 'excluded', stage = 'excluded',
-          attempt_count = EXCLUDED.attempt_count, excluded_at = now(), exclusion_reason = EXCLUDED.exclusion_reason,
-          retryable = true, last_error = EXCLUDED.last_error, updated_at = now()`;
-    }
+    if (!retry) await excludeTerminalDocument(sql, item, message);
   });
   console.error(
     JSON.stringify({

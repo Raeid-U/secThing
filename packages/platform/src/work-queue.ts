@@ -15,6 +15,24 @@ export class LeaseLostError extends Error {
   constructor() { super("Work lease is no longer owned by this attempt."); }
 }
 
+export async function excludeTerminalDocument(tx: TransactionSql, item: Pick<ClaimedWork, "work_type" | "filing_id" | "document_id" | "attempt_count">, message: string) {
+  if (item.document_id) {
+    await tx`UPDATE filing_documents SET status = 'excluded', stage = 'excluded', attempt_count = ${item.attempt_count},
+      excluded_at = now(), exclusion_reason = ${message}, retryable = true, last_error = ${message}, updated_at = now()
+      WHERE id = ${item.document_id}`;
+  } else if (item.work_type === "acquire_filing_source" && item.filing_id) {
+    await tx`INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, status, stage, attempt_count,
+      excluded_at, exclusion_reason, retryable, last_error)
+      SELECT id, '__manifest__', 'manifest_failure',
+        'https://www.sec.gov/Archives/edgar/data/' || cik::text || '/' || replace(accession_number, '-', '') || '/index.json',
+        'excluded', 'excluded', ${item.attempt_count}, now(), ${message}, true, ${message}
+      FROM filings WHERE id = ${item.filing_id}
+      ON CONFLICT (filing_id, document_name) DO UPDATE SET status = 'excluded', stage = 'excluded',
+        attempt_count = EXCLUDED.attempt_count, excluded_at = now(), exclusion_reason = EXCLUDED.exclusion_reason,
+        retryable = true, last_error = EXCLUDED.last_error, updated_at = now()`;
+  }
+}
+
 /** Fences persisted stage results with the same row used for lease recovery. */
 export class WorkQueue {
   constructor(private sql: Sql, private owner: string, private leaseSeconds = 300) {}
@@ -57,19 +75,20 @@ export class WorkQueue {
 
   async recoverExpired() {
     return this.sql.begin(async (tx) => {
-      const rows = await tx<{ id: number; job_id: number; status: string }[]>`
+      const rows = await tx<(ClaimedWork & { status: string })[]>`
         UPDATE work_items SET status = CASE WHEN attempt_count < 3 THEN 'pending' ELSE 'failed' END,
           lease_owner = null, lease_expires_at = null, next_run_at = now(),
           error_code = 'lease_expired', error_message = 'Worker lease expired before completion.', updated_at = now()
         WHERE id IN (SELECT id FROM work_items WHERE status = 'running' AND lease_expires_at <= clock_timestamp()
           ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 100)
-        RETURNING id, job_id, status
+        RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, input, status
       `;
       for (const row of rows) {
         await tx`UPDATE jobs SET status = CASE WHEN EXISTS (
             SELECT 1 FROM work_items WHERE job_id = ${row.job_id} AND status IN ('pending', 'running')
           ) THEN 'running' ELSE 'partial' END,
           last_error = 'Worker lease expired before completion.', updated_at = now() WHERE id = ${row.job_id}`;
+        if (row.status === "failed") await excludeTerminalDocument(tx, row, "Worker lease expired before completion.");
       }
       return rows;
     });

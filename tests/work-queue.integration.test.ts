@@ -106,6 +106,23 @@ describe.skipIf(!databaseUrl)("worker leases (PostgreSQL)", () => {
     expect((await sql`SELECT status, last_error FROM jobs`)[0]).toMatchObject({ status: "partial", last_error: expect.stringContaining("lease expired") });
   });
 
+  it("turns a third expired acquisition lease into a visible retryable exclusion", async () => {
+    const company = await sql`INSERT INTO companies (cik, legal_name, identity_source, identity_fetched_at)
+      VALUES (${Number(`9${Date.now().toString().slice(-8)}`)}, 'Lease Fixture', 'fixture', now()) RETURNING id, cik`;
+    const filing = await sql`INSERT INTO filings (company_id, cik, accession_number, form_type, filing_date, is_supported)
+      VALUES (${company[0].id}, ${company[0].cik}, ${`lease-${randomUUID()}`}, '10-K', '2026-01-01', true) RETURNING id`;
+    await sql`UPDATE work_items SET work_type = 'acquire_filing_source', filing_id = ${filing[0].id},
+      company_id = ${company[0].id}, attempt_count = 2`;
+    await first.claim();
+    await sql`UPDATE work_items SET lease_expires_at = now() - interval '1 second'`;
+    expect(await second.recoverExpired()).toMatchObject([{ status: "failed", work_type: "acquire_filing_source" }]);
+    expect(await sql`SELECT document_name, document_type, stage, attempt_count, retryable, exclusion_reason
+      FROM filing_documents WHERE filing_id = ${filing[0].id}`).toMatchObject([{
+        document_name: "__manifest__", document_type: "manifest_failure", stage: "excluded",
+        attempt_count: 3, retryable: true, exclusion_reason: expect.stringContaining("lease expired"),
+      }]);
+  });
+
   it("recovers a lease expiring after a real worker has started, without another restart", async () => {
     await sql`UPDATE work_items SET status = 'running', attempt_count = 3, lease_owner = 'crashed-worker',
       lease_expires_at = now() + interval '3 seconds'`;
