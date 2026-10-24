@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { ChunkingAndIndexing, chunkingProfileVersion } from "./chunking.js";
-import { FilingParser, filingParserVersion } from "./filing-parser.js";
+import { FilingParser, filingParserVersion, pageRangeForOffsets } from "./filing-parser.js";
 import type { PlatformConfig } from "./config.js";
 import type { Sql, TransactionSql } from "postgres";
 
 type EvidenceWork = { job_id: number; company_id: number | null; filing_id: number | null; document_id: number | null };
 type ParseDocument = { id: number; filing_id: number; form_type: string; local_path: string; content_type: string | null; content_hash: string };
-type ChunkDocument = { document_id: number; filing_id: number; company_id: number; normalized_document_id: number; normalized_text_path: string; text_hash: string };
+type ChunkDocument = { document_id: number; filing_id: number; company_id: number; normalized_document_id: number; normalized_text_path: string; text_hash: string; page_map: Array<{ pageNumber: number; startOffset: number; endOffset: number }> };
 const parser = new FilingParser();
 const chunking = new ChunkingAndIndexing();
 
@@ -97,15 +97,17 @@ export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "
     // Retain prior generations: completed answers may still cite their spans.
     await transaction`UPDATE normalized_documents SET status = 'superseded', updated_at = now() WHERE document_id = ${document.id}`;
     const normalized = await transaction<{ id: number }[]>`
-      INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, warnings, generation)
+      INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, warnings, generation, page_map)
       SELECT ${document.id}, ${filingParserVersion}, ${document.content_hash}, ${parsed.normalizedTextPath}, ${parsed.textHash}, ${parsed.textLength}, 'parsed', ${transaction.json(parsed.warnings)},
-        COALESCE(max(generation), 0) + 1 FROM normalized_documents WHERE document_id = ${document.id}
+        COALESCE(max(generation), 0) + 1, ${transaction.json(parsed.pages as never)}
+      FROM normalized_documents WHERE document_id = ${document.id}
       RETURNING id
     `;
     const normalizedDocumentId = normalized[0].id;
+    const fullPages = pageRangeForOffsets(parsed.pages, 0, parsed.textLength);
     const fullSpan = await transaction<{ id: number }[]>`
-      INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind)
-      VALUES (${normalizedDocumentId}, 0, ${parsed.textLength}, ${parsed.textHash}, 'document') RETURNING id
+      INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind, page_start, page_end)
+      VALUES (${normalizedDocumentId}, 0, ${parsed.textLength}, ${parsed.textHash}, 'document', ${fullPages.pageStart ?? null}, ${fullPages.pageEnd ?? null}) RETURNING id
     `;
     if (parsed.sections.length === 0) {
       await transaction`
@@ -114,9 +116,10 @@ export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "
       `;
     } else {
       for (const section of parsed.sections) {
+        const pages = pageRangeForOffsets(parsed.pages, section.startOffset, section.endOffset);
         const span = await transaction<{ id: number }[]>`
-          INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind)
-          VALUES (${normalizedDocumentId}, ${section.startOffset}, ${section.endOffset}, ${createHash("sha256").update(parsed.text.slice(section.startOffset, section.endOffset)).digest("hex")}, 'section')
+          INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind, page_start, page_end)
+          VALUES (${normalizedDocumentId}, ${section.startOffset}, ${section.endOffset}, ${createHash("sha256").update(parsed.text.slice(section.startOffset, section.endOffset)).digest("hex")}, 'section', ${pages.pageStart ?? null}, ${pages.pageEnd ?? null})
           RETURNING id
         `;
         await transaction`
@@ -126,7 +129,7 @@ export async function parseFilingSource(sql: Sql, config: Pick<PlatformConfig, "
       }
     }
     await transaction`UPDATE filings SET filing_status = 'parsed', updated_at = now() WHERE id = ${document.filing_id}`;
-    await transaction`UPDATE filing_documents SET stage = 'parsed', updated_at = now() WHERE id = ${document.id}`;
+    await transaction`UPDATE filing_documents SET stage = 'parsed', page_count = ${parsed.pages.length || null}, updated_at = now() WHERE id = ${document.id}`;
     await queueChunking(transaction, item.job_id, item.company_id, document.filing_id, document.id);
   });
 }
@@ -162,7 +165,7 @@ export async function chunkDocument(sql: Sql, item: EvidenceWork, assertOwnershi
     await transaction`SELECT id FROM filing_documents WHERE id = ${item.document_id} FOR UPDATE`;
     const documents = await transaction<ChunkDocument[]>`
       SELECT filing_documents.id AS document_id, filing_documents.filing_id, filings.company_id,
-        normalized_documents.id AS normalized_document_id, normalized_documents.normalized_text_path, normalized_documents.text_hash
+        normalized_documents.id AS normalized_document_id, normalized_documents.normalized_text_path, normalized_documents.text_hash, normalized_documents.page_map
       FROM normalized_documents
       JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
       JOIN filings ON filings.id = filing_documents.filing_id
@@ -195,9 +198,10 @@ export async function chunkDocument(sql: Sql, item: EvidenceWork, assertOwnershi
     await transaction`DELETE FROM chunks WHERE normalized_document_id = ${document.normalized_document_id}`;
     await transaction`DELETE FROM source_spans WHERE normalized_document_id = ${document.normalized_document_id} AND span_kind = 'chunk'`;
     for (const chunk of chunks) {
+      const pages = pageRangeForOffsets(document.page_map ?? [], chunk.startOffset, chunk.endOffset);
       const spans = await transaction<{ id: number }[]>`
-        INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind)
-        VALUES (${document.normalized_document_id}, ${chunk.startOffset}, ${chunk.endOffset}, ${chunk.hash}, 'chunk')
+        INSERT INTO source_spans (normalized_document_id, start_offset, end_offset, span_text_hash, span_kind, page_start, page_end)
+        VALUES (${document.normalized_document_id}, ${chunk.startOffset}, ${chunk.endOffset}, ${chunk.hash}, 'chunk', ${pages.pageStart ?? null}, ${pages.pageEnd ?? null})
         RETURNING id
       `;
       await transaction`
@@ -211,4 +215,3 @@ export async function chunkDocument(sql: Sql, item: EvidenceWork, assertOwnershi
     await transaction`UPDATE filing_documents SET stage = 'chunked', updated_at = now() WHERE id = ${document.document_id}`;
   });
 }
-

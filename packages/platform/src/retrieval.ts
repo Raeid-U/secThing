@@ -14,7 +14,7 @@ export type SearchFilters = {
   limit: number;
 };
 type Profile = { id: number; dimension: number | null };
-export type SearchHit = { chunk_id: string; rank: number; chunk_text: string; filing_id: string; document_id: string; normalized_document_id: string; source_span_id: string; form_type: string; filing_date: string; accession_number: string; section_type: string; section_label: string; start_offset: number; end_offset: number; text_hash: string; [key: string]: unknown };
+export type SearchHit = { chunk_id: string; rank: number; chunk_text: string; filing_id: string; document_id: string; normalized_document_id: string; source_span_id: string; form_type: string; filing_date: string; accession_number: string; section_type: string; section_label: string; start_offset: number; end_offset: number; page_start: number | null; page_end: number | null; text_hash: string; [key: string]: unknown };
 type Hit = SearchHit;
 export type QueryAnalysis = { formTypes: string[]; filedAfter?: string; filedBefore?: string; metrics: string[]; comparison: boolean; numeric: boolean };
 export type EvidenceSource = { label: string; kind: "chunk" | "financial_fact"; sourceId: string; text: string; tokenEstimate: number; locator: Record<string, unknown> };
@@ -272,7 +272,7 @@ export class Retrieval {
     }
     const retrieve = async (semantic: boolean) => this.sql<Hit[]>`
       SELECT c.id AS chunk_id, c.company_id, c.filing_id, c.document_id, c.normalized_document_id,
-        c.normalized_text_hash AS text_hash, c.chunk_text, c.start_offset, c.end_offset, c.source_span_id,
+        c.normalized_text_hash AS text_hash, c.chunk_text, c.start_offset, c.end_offset, c.source_span_id, sp.page_start, sp.page_end,
         c.section_id, f.form_type, f.filing_date, f.report_date, f.accession_number,
         d.document_name, s.section_type, s.section_label,
         CASE WHEN ${semantic} THEN 1 - (e.embedding <=> ${vector ? JSON.stringify(vector) : "[1]"}::vector)
@@ -283,6 +283,7 @@ export class Retrieval {
       FROM chunks c JOIN filings f ON f.id = c.filing_id
       JOIN filing_documents d ON d.id = c.document_id JOIN filing_sections s ON s.id = c.section_id
       JOIN normalized_documents n ON n.id = c.normalized_document_id
+      JOIN source_spans sp ON sp.id = c.source_span_id
       LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id AND e.profile_id = ${profile?.id ?? null}
       WHERE c.company_id = ${companyId} AND c.chunk_profile_version = ${chunkingProfileVersion}
         AND n.status = 'parsed' AND n.parser_version = ${filingParserVersion}
@@ -343,7 +344,8 @@ export class Retrieval {
       ...selected.map((hit, index) => ({ label: `C${index + 1}`, kind: "chunk" as const, sourceId: `chunk:${hit.chunk_id}`, text: hit.chunk_text,
         tokenEstimate: Math.max(1, Math.ceil(hit.chunk_text.length / 4)), locator: { chunkId: hit.chunk_id, filingId: hit.filing_id, documentId: hit.document_id,
           normalizedDocumentId: hit.normalized_document_id, sourceSpanId: hit.source_span_id, accessionNumber: hit.accession_number, formType: hit.form_type,
-          filingDate: hit.filing_date, sectionType: hit.section_type, sectionLabel: hit.section_label, startOffset: hit.start_offset, endOffset: hit.end_offset, textHash: hit.text_hash } })),
+          filingDate: hit.filing_date, sectionType: hit.section_type, sectionLabel: hit.section_label, startOffset: hit.start_offset, endOffset: hit.end_offset,
+          pageStart: hit.page_start, pageEnd: hit.page_end, textHash: hit.text_hash } })),
     ];
     const sources: EvidenceSource[] = [];
     let used = 0;

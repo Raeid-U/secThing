@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FilingParser, detectFilingSections, normalizeFilingText } from "@secthing/platform";
+import { FilingParser, detectFilingSections, normalizeFilingText, pageRangeForOffsets } from "@secthing/platform";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -49,5 +49,16 @@ describe("FilingParser", () => {
     const sections = detectFilingSections(text, "8-K/A");
     expect(sections.map((s) => s.sectionType)).toEqual(["unknown", "item_2_02", "item_9_01"]);
     expect(sections.map((s) => text.slice(s.startOffset, s.endOffset)).join("")).toBe(text);
+  });
+
+  it("maps normalized offsets to exact PDF page ranges", () => {
+    const pages = [
+      { pageNumber: 1, startOffset: 0, endOffset: 20 },
+      { pageNumber: 2, startOffset: 23, endOffset: 50 },
+      { pageNumber: 3, startOffset: 53, endOffset: 80 },
+    ];
+    expect(pageRangeForOffsets(pages, 25, 45)).toEqual({ pageStart: 2, pageEnd: 2 });
+    expect(pageRangeForOffsets(pages, 18, 60)).toEqual({ pageStart: 1, pageEnd: 3 });
+    expect(pageRangeForOffsets(pages, 20, 23)).toEqual({});
   });
 });

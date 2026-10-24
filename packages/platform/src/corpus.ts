@@ -34,7 +34,7 @@ export class CorpusCatalog {
     const terminalDocuments = (stageCounts.embedded ?? 0) + (stageCounts.excluded ?? 0);
     const documentTotal = documents.reduce((sum, row) => sum + row.count, 0);
     const embeddingComplete = !embeddings.configured || embeddings.chunks === embeddings.embedded;
-    const operational = coverage[0].supported > 0 && coverage[0].missing_manifests === 0 && coverage[0].acquisition_failures === 0 &&
+    const operational = coverage[0].supported > 0 && coverage[0].missing_manifests === 0 &&
       documentTotal > 0 && terminalDocuments === documentTotal && facts[0].complete && embeddingComplete;
     return {
       readiness: operational ? (excluded.length ? "ready_with_exclusions" : "ready") : "processing",

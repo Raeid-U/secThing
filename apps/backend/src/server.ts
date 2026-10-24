@@ -627,7 +627,8 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
                 "Extracted evidence integrity check failed. Reparse this source.",
             });
         const sections = await tx`
-        SELECT filing_sections.id, section_type, section_label, confidence_status, source_spans.start_offset, source_spans.end_offset
+        SELECT filing_sections.id, section_type, section_label, confidence_status, source_spans.start_offset, source_spans.end_offset,
+          source_spans.page_start, source_spans.page_end
         FROM filing_sections JOIN source_spans ON source_spans.id = filing_sections.source_span_id
         WHERE filing_sections.document_id = ${document.document_id} AND source_spans.normalized_document_id = ${document.normalized_document_id}
         ORDER BY source_spans.start_offset
