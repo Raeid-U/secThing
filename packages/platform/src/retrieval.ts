@@ -8,6 +8,7 @@ import { filingParserVersion } from "./filing-parser.js";
 export type SearchMode = "full_text" | "semantic" | "hybrid";
 export type SearchFilters = {
   formType?: string;
+  formTypes?: string[];
   sectionType?: string;
   filedAfter?: string;
   filedBefore?: string;
@@ -291,6 +292,7 @@ export class Retrieval {
         AND (CASE WHEN ${semantic} THEN e.chunk_id IS NOT NULL AND e.chunk_hash = c.chunk_hash
           ELSE c.search_vector @@ websearch_to_tsquery('english', ${query}) END)
         AND (${filters.formType ?? null}::text IS NULL OR f.form_type = ${filters.formType ?? null})
+        AND (${filters.formTypes?.length ? filters.formTypes : null}::text[] IS NULL OR f.form_type = ANY(${filters.formTypes?.length ? filters.formTypes : []}::text[]))
         AND (${filters.sectionType ?? null}::text IS NULL OR s.section_type = ${filters.sectionType ?? null})
         AND (${filters.filedAfter ?? null}::date IS NULL OR f.filing_date >= ${filters.filedAfter ?? null}::date)
         AND (${filters.filedBefore ?? null}::date IS NULL OR f.filing_date <= ${filters.filedBefore ?? null}::date)
@@ -323,7 +325,7 @@ export class Retrieval {
 
   async evidencePackage(companyId: number, question: string, options: { maxInputTokens: number; reservedOutputTokens?: number }): Promise<EvidencePackage> {
     const analysis = analyzeQuestion(question);
-    const search = await this.search(companyId, question, "hybrid", { limit: 36, formType: analysis.formTypes.length === 1 ? analysis.formTypes[0] : undefined,
+    const search = await this.search(companyId, question, "hybrid", { limit: 36, formTypes: analysis.formTypes.length ? analysis.formTypes : undefined,
       filedAfter: analysis.filedAfter, filedBefore: analysis.filedBefore });
     const selected: SearchHit[] = [];
     const perFiling = new Map<string, number>();
@@ -332,6 +334,30 @@ export class Retrieval {
       if (analysis.comparison && count >= 2) continue;
       selected.push(hit); perFiling.set(String(hit.filing_id), count + 1);
     }
+    const selectedIds = selected.map((hit) => hit.chunk_id);
+    const neighbors = !selectedIds.length ? [] : await this.sql<SearchHit[]>`
+      SELECT DISTINCT c.id AS chunk_id, 0::float AS rank, c.chunk_text, c.filing_id, c.document_id,
+        c.normalized_document_id, c.source_span_id, f.form_type, f.filing_date::text, f.accession_number,
+        s.section_type, s.section_label, c.start_offset, c.end_offset, sp.page_start, sp.page_end,
+        c.normalized_text_hash AS text_hash
+      FROM chunks seed
+      JOIN chunks c ON c.normalized_document_id = seed.normalized_document_id AND c.section_id = seed.section_id AND c.id <> seed.id
+      JOIN normalized_documents n ON n.id = c.normalized_document_id
+      JOIN filing_documents d ON d.id = c.document_id
+      JOIN filings f ON f.id = c.filing_id
+      JOIN filing_sections s ON s.id = c.section_id
+      JOIN source_spans sp ON sp.id = c.source_span_id
+      WHERE seed.id = ANY(${selectedIds}::bigint[]) AND NOT (c.id = ANY(${selectedIds}::bigint[]))
+        AND n.status = 'parsed' AND n.parser_version = ${filingParserVersion}
+        AND n.source_content_hash = d.content_hash AND n.text_hash = c.normalized_text_hash
+        AND (c.id = (SELECT before.id FROM chunks before
+          WHERE before.normalized_document_id = seed.normalized_document_id AND before.section_id = seed.section_id
+            AND before.start_offset < seed.start_offset ORDER BY before.start_offset DESC LIMIT 1)
+          OR c.id = (SELECT after.id FROM chunks after
+          WHERE after.normalized_document_id = seed.normalized_document_id AND after.section_id = seed.section_id
+            AND after.start_offset > seed.start_offset ORDER BY after.start_offset LIMIT 1))
+      ORDER BY c.id
+    `;
     const facts = analysis.metrics.length ? await this.sql<{ id: string; metric: string; taxonomy: string; concept: string; unit: string; value: string; period_start: string | null; period_end: string | null; instant_date: string | null; fiscal_year: number | null; fiscal_period: string | null; form_type: string | null; accession_number: string | null; conflict_status: string }[]>`
       SELECT id, metric, taxonomy, concept, unit, value::text, period_start::text, period_end::text, instant_date::text,
         fiscal_year, fiscal_period, form_type, accession_number, conflict_status FROM financial_facts
@@ -341,7 +367,7 @@ export class Retrieval {
       ...facts.map((fact, index) => ({ label: `F${index + 1}`, kind: "financial_fact" as const, sourceId: `financial_fact:${fact.id}`,
         text: `${fact.metric}: ${fact.value} ${fact.unit}; period ${fact.period_start ? `${fact.period_start} to ${fact.period_end}` : fact.instant_date}; ${fact.form_type ?? "unknown form"}; status ${fact.conflict_status}.`, tokenEstimate: 32,
         locator: { financialFactId: fact.id, accessionNumber: fact.accession_number, formType: fact.form_type, taxonomy: fact.taxonomy, concept: fact.concept } })),
-      ...selected.map((hit, index) => ({ label: `C${index + 1}`, kind: "chunk" as const, sourceId: `chunk:${hit.chunk_id}`, text: hit.chunk_text,
+      ...[...selected, ...neighbors].map((hit, index) => ({ label: `C${index + 1}`, kind: "chunk" as const, sourceId: `chunk:${hit.chunk_id}`, text: hit.chunk_text,
         tokenEstimate: Math.max(1, Math.ceil(hit.chunk_text.length / 4)), locator: { chunkId: hit.chunk_id, filingId: hit.filing_id, documentId: hit.document_id,
           normalizedDocumentId: hit.normalized_document_id, sourceSpanId: hit.source_span_id, accessionNumber: hit.accession_number, formType: hit.form_type,
           filingDate: hit.filing_date, sectionType: hit.section_type, sectionLabel: hit.section_label, startOffset: hit.start_offset, endOffset: hit.end_offset,
@@ -351,7 +377,18 @@ export class Retrieval {
     let used = 0;
     for (const source of candidates) { if (used + source.tokenEstimate > options.maxInputTokens) continue; sources.push(source); used += source.tokenEstimate; }
     const generations = [...new Set(sources.flatMap((source) => source.kind === "chunk" ? [String(source.locator.normalizedDocumentId)] : []))];
+    const corpusCoverage = await this.sql<{ earliest: string | null; latest: string | null; supported: number; excluded: number; excluded_documents: unknown }[]>`
+      SELECT min(f.filing_date)::text AS earliest, max(f.filing_date)::text AS latest,
+        count(DISTINCT f.id) FILTER (WHERE f.is_supported)::integer AS supported,
+        count(d.id) FILTER (WHERE d.stage = 'excluded')::integer AS excluded,
+        COALESCE(jsonb_agg(jsonb_build_object('documentId', d.id, 'accessionNumber', f.accession_number,
+          'documentName', d.document_name, 'reason', d.exclusion_reason) ORDER BY f.filing_date DESC, d.id)
+          FILTER (WHERE d.stage = 'excluded'), '[]'::jsonb) AS excluded_documents
+      FROM filings f LEFT JOIN filing_documents d ON d.filing_id = f.id WHERE f.company_id = ${companyId}`;
     return { question, analysis, sources, tokens: { budget: options.maxInputTokens, used, reservedOutput: options.reservedOutputTokens ?? this.config.aiChatMaxOutputTokens ?? 1_024 },
-      generationIds: generations, coverage: { retrievalMode: search.mode, fallback: search.fallback, sourceCount: sources.length, financialFactCount: facts.length } };
+      generationIds: generations, coverage: { retrievalMode: search.mode, fallback: search.fallback, sourceCount: sources.length,
+        financialFactCount: facts.length, earliestFilingDate: corpusCoverage[0].earliest, latestFilingDate: corpusCoverage[0].latest,
+        supportedFilings: corpusCoverage[0].supported, excludedDocumentCount: corpusCoverage[0].excluded,
+        excludedDocuments: corpusCoverage[0].excluded_documents } };
   }
 }

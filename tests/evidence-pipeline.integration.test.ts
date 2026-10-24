@@ -283,6 +283,19 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await expect(retrieval.search(item.company_id, "orchard", "semantic", { limit: 10 })).rejects.toThrow();
   });
 
+  it("packages neighboring passages and disclosed corpus coverage", async () => {
+    await source(`${"Context before the result. ".repeat(75)}\n\nNeedlemetric changed during the period.\n\n${"Context after the result. ".repeat(75)}`);
+    await parseAndIndex();
+    await sql`INSERT INTO filing_documents (filing_id, document_name, document_type, content_type, sec_url, status, stage, exclusion_reason)
+      VALUES (${item.filing_id}, 'technical.xsd', 'xbrl_technical', 'application/xml', 'https://www.sec.gov/technical.xsd',
+        'excluded', 'excluded', 'technical_xbrl_support')`;
+    const evidence = await new Retrieval(sql, loadConfig({ DATABASE_URL: scopedUrl.toString() }))
+      .evidencePackage(item.company_id, "What changed about needlemetric?", { maxInputTokens: 4_000 });
+    expect(evidence.sources.filter((entry) => entry.kind === "chunk").length).toBeGreaterThan(1);
+    expect(evidence.coverage).toMatchObject({ retrievalMode: "full_text", supportedFilings: 1,
+      excludedDocumentCount: 1, excludedDocuments: [{ documentName: "technical.xsd", reason: "technical_xbrl_support" }] });
+  });
+
   it("blocks questions until corpus readiness, then audits a citation-safe grounded answer", async () => {
     await parseAndIndex();
     const init = post({ question: "What happened to orchard revenue?" });
