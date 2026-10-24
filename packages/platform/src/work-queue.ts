@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 export type ClaimedWork = {
   id: number;
   job_id: number;
-  work_type: "resolve_company" | "resolve_company_preview" | "fetch_metadata" | "acquire_filing_source" | "parse_filing_source" | "chunk_document" | "embed_document";
+  work_type: "resolve_company" | "resolve_company_preview" | "fetch_metadata" | "fetch_companyfacts" | "acquire_filing_source" | "parse_filing_source" | "chunk_document" | "embed_document";
   company_id: number | null;
   filing_id: number | null;
   document_id: number | null;

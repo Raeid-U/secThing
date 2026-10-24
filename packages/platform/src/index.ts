@@ -9,4 +9,5 @@ export { ChunkingAndIndexing, chunkingProfileVersion, type ChunkingSection, type
 export { backfillSearchIndex, chunkDocument, parseFilingSource } from "./evidence-pipeline.js";
 export { Retrieval, embeddingSettings, type SearchMode, type SearchFilters } from "./retrieval.js";
 export { CorpusCatalog } from "./corpus.js";
+export { FINANCIAL_CONCEPTS, normalizeCompanyFacts, persistCompanyFacts, type NormalizedFinancialFact } from "./financial-facts.js";
 export { WorkQueue, LeaseLostError, type ClaimedWork } from "./work-queue.js";

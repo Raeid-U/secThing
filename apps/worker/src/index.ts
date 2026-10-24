@@ -14,6 +14,7 @@ import {
   filingArchiveDirectoryUrl,
   isSupportedMvpForm,
   loadConfig,
+  persistCompanyFacts,
   SecClient,
   type CompanySubmission,
 } from "@secthing/platform";
@@ -173,13 +174,27 @@ async function fetchMetadata(item: WorkItem): Promise<void> {
   await queue.transaction(item, async (sql) => {
     const counts = await persistSubmission(sql, company, submission, startDate);
     const queued = await queueSourceAcquisition(sql, item.job_id, company.id);
+    await sql`INSERT INTO work_items (job_id, work_type, company_id, input)
+      SELECT ${item.job_id}, 'fetch_companyfacts', ${company.id}, '{}'::jsonb
+      WHERE NOT EXISTS (SELECT 1 FROM work_items WHERE job_id = ${item.job_id} AND work_type = 'fetch_companyfacts')`;
     await sql`
       UPDATE jobs
-      SET status = ${queued > 0 ? "running" : "complete"},
+      SET status = 'running',
           progress = ${sql.json({ identity: "complete", metadata: "complete", filings: { discovered: counts.discovered, total: counts.total }, sourceAcquisition: { status: queued > 0 ? "queued" : "not_applicable", queued, complete: 0, failed: 0 }, parsing: "not_started", chunking: "not_started" })},
           updated_at = now()
       WHERE id = ${item.job_id}
     `;
+  });
+}
+
+async function fetchCompanyFacts(item: WorkItem): Promise<void> {
+  if (!item.company_id) throw new Error("Companyfacts work item is missing a company.");
+  const companies = await sql<Company[]>`SELECT id, cik FROM companies WHERE id = ${item.company_id}`;
+  if (!companies[0]) throw new Error("Company no longer exists.");
+  const result = await sec.fetchCompanyFacts(companies[0].cik);
+  await queue.transaction(item, async (tx) => {
+    await storeResponse(tx, result.response);
+    await persistCompanyFacts(tx, companies[0].id, result.response, result.body);
   });
 }
 
@@ -429,6 +444,7 @@ const idleLoop = setInterval(() => {
       )
         await resolveCompany(item);
       else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
+      else if (item.work_type === "fetch_companyfacts") await fetchCompanyFacts(item);
       else if (item.work_type === "acquire_filing_source")
         await acquireFilingSource(item);
       else if (item.work_type === "parse_filing_source")

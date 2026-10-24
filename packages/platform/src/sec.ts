@@ -250,6 +250,11 @@ export class SecClient {
     };
   }
 
+  async fetchCompanyFacts(cik: number): Promise<{ body: unknown; response: SecCachedResponse }> {
+    const result = await this.fetchJson(`${SEC_DATA_URL}/api/xbrl/companyfacts/CIK${canonicalCik(cik)}.json`);
+    return { body: result.body, response: result.cache };
+  }
+
   async acquirePrimaryFiling(input: { cik: number; accessionNumber: string; formType: string; primaryDocument?: string }): Promise<AcquiredFilingDocument> {
     const result = await this.acquireFilingDocuments(input);
     const primary = result.documents.find((document) => document.documentType === "primary_filing");
