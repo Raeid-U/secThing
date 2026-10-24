@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, loadConfig, parseFilingSource, Retrieval, WorkQueue, LeaseLostError } from "@secthing/platform";
+import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, CorpusCatalog, loadConfig, parseFilingSource, Retrieval, WorkQueue, LeaseLostError } from "@secthing/platform";
 import { buildServer } from "../apps/backend/src/server.js";
 import { post } from "../apps/frontend/app/research/types.js";
 
@@ -294,6 +294,25 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(evidence.sources.filter((entry) => entry.kind === "chunk").length).toBeGreaterThan(1);
     expect(evidence.coverage).toMatchObject({ retrievalMode: "full_text", supportedFilings: 1,
       excludedDocumentCount: 1, excludedDocuments: [{ documentName: "technical.xsd", reason: "technical_xbrl_support" }] });
+  });
+
+  it("binds external embedding approval to the exact profile and corpus fingerprint", async () => {
+    await parseAndIndex();
+    const config = loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, AI_MODE: "external", LOCAL_ONLY: "false",
+      AI_EMBEDDING_PROVIDER: "openai_compatible", AI_EMBEDDING_BASE_URL: "https://embedding.example.test",
+      AI_EMBEDDING_MODEL: "external-fixture", AI_EMBEDDING_DIMENSION: "2" });
+    const retrieval = new Retrieval(sql, config, { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) });
+    const corpus = new CorpusCatalog(sql, config, retrieval);
+    expect(await retrieval.queue(item.company_id)).toMatchObject({ queued: 0, approvalRequired: true });
+    const estimate = (await corpus.embeddingEstimate(item.company_id))!;
+    expect(await corpus.approveEmbeddings(item.company_id, "stale-fingerprint", estimate.profileKey)).toBeNull();
+    expect(await corpus.approveEmbeddings(item.company_id, estimate.corpusFingerprint, estimate.profileKey)).toEqual(estimate);
+    expect(await retrieval.queue(item.company_id)).toMatchObject({ queued: 1 });
+
+    await source("A changed evidence generation invalidates the prior estimate.");
+    await parseAndIndex();
+    expect(await retrieval.queue(item.company_id)).toMatchObject({ queued: 0, approvalRequired: true });
+    expect((await corpus.embeddingEstimate(item.company_id))?.corpusFingerprint).not.toBe(estimate.corpusFingerprint);
   });
 
   it("blocks questions until corpus readiness, then audits a citation-safe grounded answer", async () => {
