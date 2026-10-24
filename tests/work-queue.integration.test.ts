@@ -125,7 +125,7 @@ describe.skipIf(!databaseUrl)("worker leases (PostgreSQL)", () => {
 
   it("recovers a lease expiring after a real worker has started, without another restart", async () => {
     await sql`UPDATE work_items SET status = 'running', attempt_count = 3, lease_owner = 'crashed-worker',
-      lease_expires_at = now() + interval '3 seconds'`;
+      lease_expires_at = now() + interval '30 seconds'`;
     const dataDir = await mkdtemp(join(tmpdir(), 'secthing-worker-recovery-'));
     const child = spawn(process.execPath, ['--import', 'tsx', 'apps/worker/src/index.ts'], {
       env: { ...process.env, DATABASE_URL: url.toString(), DATA_DIR: dataDir,
@@ -139,6 +139,7 @@ describe.skipIf(!databaseUrl)("worker leases (PostgreSQL)", () => {
     try {
       await expect.poll(() => output.includes('worker.search_backfill'), { timeout: 5000 }).toBe(true);
       expect((await sql`SELECT status FROM work_items`)[0].status).toBe('running');
+      await sql`UPDATE work_items SET lease_expires_at = now() - interval '1 second'`;
       await expect.poll(async () => (await sql`SELECT status FROM work_items`)[0].status, { timeout: 15_000 }).toBe('failed');
       expect(output).not.toContain('worker.poll_failed');
       expect((await sql`SELECT status FROM jobs`)[0].status).toBe('partial');
