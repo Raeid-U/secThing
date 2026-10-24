@@ -78,15 +78,21 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(excluded.json().results).toEqual([]);
   });
 
-  it("reparses indexed evidence without foreign-key failures and removes obsolete search results", async () => {
+  it("reparses into a new generation, hides obsolete search results, and retains old citations", async () => {
     await parseAndIndex();
     await source("Cobalt production increased.");
     await parseFilingSource(sql, { dataDir }, item);
-    expect(await sql`SELECT id FROM chunks`).toHaveLength(0);
+    expect(await sql`SELECT id FROM chunks`).toHaveLength(1);
     await chunkDocument(sql, item);
-    expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'orchard')`).toHaveLength(0);
+    expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'orchard')`).toHaveLength(1);
     expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'cobalt')`).toHaveLength(1);
-    expect(await sql`SELECT id FROM source_spans WHERE span_kind = 'chunk'`).toHaveLength(1);
+    expect(await sql`SELECT id FROM source_spans WHERE span_kind = 'chunk'`).toHaveLength(2);
+    expect((await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=orchard` })).json().results).toEqual([]);
+    const generations = await sql`SELECT id, generation, status FROM normalized_documents ORDER BY generation`;
+    expect(generations).toMatchObject([{ generation: 1, status: "superseded" }, { generation: 2, status: "parsed" }]);
+    const reopened = await app.inject({ url: `/api/v1/filings/${item.filing_id}/parsed?normalizedDocumentId=${generations[0].id}` });
+    expect(reopened.statusCode).toBe(200);
+    expect(reopened.json().text).toContain("Orchard");
   });
 
   it("indexes preamble evidence and quarterly sections with exact source offsets", async () => {
@@ -111,8 +117,8 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
   it("queues parser upgrades once and rebuilds the search index from preserved sources", async () => {
     await parseAndIndex();
     await sql`UPDATE normalized_documents SET parser_version = 'html-text-v1'`;
-    await sql`INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status)
-      SELECT document_id, 'older-parser', source_content_hash, normalized_text_path, text_hash, text_length, status FROM normalized_documents`;
+    await sql`INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, generation)
+      SELECT document_id, 'older-parser', source_content_hash, normalized_text_path, text_hash, text_length, 'superseded', generation + 1 FROM normalized_documents`;
     expect((await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=orchard` })).json().results).toEqual([]);
     const results = await Promise.all([backfillSearchIndex(sql), backfillSearchIndex(sql)]);
     expect(results.reduce((sum, r) => sum + r.queued, 0)).toBe(1);
@@ -122,7 +128,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect((await backfillSearchIndex(sql)).queued).toBe(0);
   });
 
-  it("supersedes prior parser versions and removes their evidence references", async () => {
+  it("supersedes prior parser versions while retaining their evidence references", async () => {
     await parseAndIndex();
     await sql`UPDATE normalized_documents SET parser_version = 'retired-parser'`;
     await parseFilingSource(sql, { dataDir }, item);
@@ -130,7 +136,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(await sql`SELECT id FROM normalized_documents WHERE status = 'parsed'`).toHaveLength(1);
     expect(await sql`SELECT id FROM normalized_documents WHERE status = 'superseded'`).toHaveLength(1);
     expect(await sql`SELECT id FROM source_spans WHERE normalized_document_id IN
-      (SELECT id FROM normalized_documents WHERE status = 'superseded')`).toHaveLength(0);
+      (SELECT id FROM normalized_documents WHERE status = 'superseded')`).not.toHaveLength(0);
   });
 
   it("keeps the prior evidence intact when persistence fails mid-reparse", async () => {

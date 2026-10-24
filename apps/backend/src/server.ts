@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   Retrieval,
   CorpusCatalog,
+  GroundedAnswer,
   chunkingProfileVersion,
   assessReadiness,
   backfillSearchIndex,
@@ -31,6 +32,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
   const sql = connectDatabase(config.databaseUrl);
   const retrieval = new Retrieval(sql, config);
   const corpus = new CorpusCatalog(sql, config, retrieval);
+  const groundedAnswer = new GroundedAnswer(sql, config, undefined, retrieval);
   app.register(cors, { origin: true });
   app.addHook("onClose", async () => sql.end({ timeout: 5 }));
 
@@ -355,6 +357,24 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     return reply.code(202).send({ approved, ...queued });
   });
 
+  app.post("/api/v1/companies/:companyId/questions", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ question: z.string().trim().min(2).max(2_000) }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "A valid company and question are required." });
+    const company = await sql`SELECT id FROM companies WHERE id = ${id.data}`;
+    if (!company[0]) return reply.code(404).send({ error: "Company not found." });
+    const status = await corpus.status(id.data);
+    if (status.readiness !== "ready" && status.readiness !== "ready_with_exclusions")
+      return reply.code(409).send({ error: "The filing corpus is not operationally complete yet.", corpus: status });
+    if (!config.aiChatProvider || !config.aiChatBaseUrl || !config.aiChatModel)
+      return reply.code(503).send({ error: "A chat provider and model must be configured for grounded questions." });
+    try {
+      return { ...(await groundedAnswer.answer(id.data, body.data.question)), externalDisclosure: config.aiMode === "external" ? "The bounded evidence package for this question was sent to the configured external chat provider." : null };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Grounded answer generation failed." });
+    }
+  });
+
   app.post(
     "/api/v1/companies/:companyId/search/reindex",
     async (request, reply) => {
@@ -545,6 +565,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     const readerQuery = z
       .object({
         documentId: z.coerce.number().int().positive().optional(),
+        normalizedDocumentId: z.coerce.number().int().positive().optional(),
         textHash: z.string().optional(),
       })
       .safeParse(request.query);
@@ -573,10 +594,12 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       FROM normalized_documents
       JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
       JOIN filings ON filings.id = filing_documents.filing_id
-      WHERE filings.id = ${id.data} AND normalized_documents.status = 'parsed'
+      WHERE filings.id = ${id.data}
         AND (${readerQuery.data.documentId ?? null}::bigint IS NULL OR filing_documents.id = ${readerQuery.data.documentId ?? null})
-        AND normalized_documents.parser_version = ${filingParserVersion}
-        AND normalized_documents.source_content_hash = filing_documents.content_hash
+        AND ((${readerQuery.data.normalizedDocumentId ?? null}::bigint IS NOT NULL AND normalized_documents.id = ${readerQuery.data.normalizedDocumentId ?? null}) OR
+          (${readerQuery.data.normalizedDocumentId ?? null}::bigint IS NULL AND normalized_documents.status = 'parsed'
+            AND normalized_documents.parser_version = ${filingParserVersion}
+            AND normalized_documents.source_content_hash = filing_documents.content_hash))
       ORDER BY normalized_documents.parsed_at DESC, normalized_documents.id DESC LIMIT 1
     `;
       const document = documents[0];
