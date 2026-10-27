@@ -17,12 +17,13 @@ const environmentSchema = z.object({
   SEC_USER_AGENT: z.string().optional(),
   SEC_RATE_LIMIT_PER_SECOND: z.coerce.number().positive().max(10).default(5),
   AI_MODE: z.enum(["disabled", "local", "external"]).default("disabled"),
-  AI_CHAT_PROVIDER: z.preprocess((value) => value === "" ? undefined : value, z.enum(["ollama"]).optional()),
+  AI_CHAT_PROVIDER: z.preprocess((value) => value === "" ? undefined : value, z.enum(["ollama", "openai_compatible"]).optional()),
   AI_CHAT_BASE_URL: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
   AI_CHAT_API_KEY: optionalNonEmptyString,
   AI_CHAT_MODEL: optionalNonEmptyString,
   AI_CHAT_CONTEXT_WINDOW: z.coerce.number().int().positive().default(8_192),
-  AI_EMBEDDING_PROVIDER: z.preprocess((value) => value === "" ? undefined : value, z.enum(["ollama"]).optional()),
+  AI_CHAT_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1_024),
+  AI_EMBEDDING_PROVIDER: z.preprocess((value) => value === "" ? undefined : value, z.enum(["ollama", "openai_compatible"]).optional()),
   AI_EMBEDDING_BASE_URL: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
   AI_EMBEDDING_API_KEY: optionalNonEmptyString,
   AI_EMBEDDING_MODEL: optionalNonEmptyString,
@@ -44,12 +45,13 @@ export type PlatformConfig = {
   secUserAgent?: string;
   secRateLimitPerSecond: number;
   aiMode: "disabled" | "local" | "external";
-  aiChatProvider?: "ollama";
+  aiChatProvider?: "ollama" | "openai_compatible";
   aiChatBaseUrl?: string;
   aiChatApiKey?: string;
   aiChatModel?: string;
   aiChatContextWindow: number;
-  aiEmbeddingProvider?: "ollama";
+  aiChatMaxOutputTokens?: number;
+  aiEmbeddingProvider?: "ollama" | "openai_compatible";
   aiEmbeddingBaseUrl?: string;
   aiEmbeddingApiKey?: string;
   aiEmbeddingModel?: string;
@@ -72,6 +74,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): PlatformCon
     aiChatApiKey: environment.AI_CHAT_API_KEY,
     aiChatModel: environment.AI_CHAT_MODEL,
     aiChatContextWindow: environment.AI_CHAT_CONTEXT_WINDOW,
+    aiChatMaxOutputTokens: environment.AI_CHAT_MAX_OUTPUT_TOKENS,
     aiEmbeddingProvider: environment.AI_EMBEDDING_PROVIDER,
     aiEmbeddingBaseUrl: environment.AI_EMBEDDING_BASE_URL,
     aiEmbeddingApiKey: environment.AI_EMBEDDING_API_KEY,

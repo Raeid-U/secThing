@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const filingParserVersion = "html-text-v2";
+export const filingParserVersion = "filing-text-v3";
 
 export type ParsedFilingSection = {
   sectionType: string;
@@ -19,7 +19,31 @@ export type ParsedFiling = {
   textLength: number;
   warnings: string[];
   sections: ParsedFilingSection[];
+  pages: Array<{ pageNumber: number; startOffset: number; endOffset: number }>;
 };
+
+export function pageRangeForOffsets(pages: ParsedFiling["pages"], startOffset: number, endOffset: number) {
+  const intersecting = pages.filter((page) => page.endOffset > startOffset && page.startOffset < endOffset);
+  return intersecting.length ? { pageStart: intersecting[0].pageNumber, pageEnd: intersecting.at(-1)!.pageNumber } : {};
+}
+
+async function extractPdf(buffer: Buffer) {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const document = await pdfjs.getDocument({ data: new Uint8Array(buffer), useWorkerFetch: false, useSystemFonts: true }).promise;
+  const parts: string[] = [];
+  const pages: ParsedFiling["pages"] = [];
+  let offset = 0;
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const pageText = normalizeFilingText(content.items.flatMap((item) => "str" in item ? [item.str] : []).join(" "), "text/plain");
+    if (parts.length) { parts.push("\n\f\n"); offset += 3; }
+    const startOffset = offset;
+    parts.push(pageText); offset += pageText.length;
+    pages.push({ pageNumber, startOffset, endOffset: offset });
+  }
+  return { text: parts.join(""), pages };
+}
 
 function decodeEntities(value: string): string {
   return value
@@ -120,8 +144,10 @@ export function detectFilingSections(text: string, formType: string): ParsedFili
 
 export class FilingParser {
   async parse(input: { sourcePath: string; contentType: string | null; formType: string; dataDir: string }): Promise<ParsedFiling> {
-    const source = await readFile(input.sourcePath, "utf8");
-    const text = normalizeFilingText(source, input.contentType);
+    const source = await readFile(input.sourcePath);
+    const isPdf = input.contentType?.includes("pdf") || input.sourcePath.toLowerCase().endsWith(".pdf");
+    const extracted = isPdf ? await extractPdf(source) : { text: normalizeFilingText(source.toString("utf8"), input.contentType), pages: [] };
+    const text = extracted.text;
     if (!text) throw new Error("Filing source produced no readable text.");
     const textHash = createHash("sha256").update(text).digest("hex");
     const directory = join(input.dataDir, "sec", "normalized");
@@ -136,6 +162,7 @@ export class FilingParser {
       textLength: text.length,
       warnings: sections.length === 0 ? ["No form-aware section headings were detected; the full document is retained as an unknown section."] : [],
       sections,
+      pages: extracted.pages,
     };
   }
 }

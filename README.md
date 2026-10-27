@@ -16,7 +16,7 @@ The backend is available on `http://localhost:8080`:
 - `GET /ready` checks PostgreSQL, current migrations, and the writable data directory.
 - `GET /api/v1/system/capabilities` exposes explicit capability flags.
 
-The records workspace provides guided company intake, filterable filings, company-scoped keyword/meaning/combined search, and a fixed frame with independently scrolling original-source and extracted-text panes. Selecting a result opens its exact extracted passage. Sources currently supported by acquisition and parsing are HTML/text; the original view renders an isolated copy of the preserved source with scripts and external assets blocked. Financial facts and cited AI answers remain pending.
+The records workspace provides guided company intake, filterable filings, company-scoped keyword/meaning/combined search, and a fixed frame with independently scrolling original-source and extracted-text panes. Selecting a result opens its exact extracted passage. The corpus includes primary HTML/text/PDF filings and human-readable exhibits, while technical assets are disclosed as exclusions. PDF citations retain page provenance. Structured financial facts and the company-scoped **Ask the filings** surface return citation-validated answers only after the corpus is operationally complete.
 
 The worker backfills missing or outdated chunk indexes when it starts. Use **Update index** in the workspace or `POST /api/v1/companies/:companyId/search/reindex` to queue missing indexes and retry failed embedding jobs. The response contains `queued`, `jobIds`, and optionally `embeddingsQueued`; already indexed or actively processing documents are skipped. Search is available at `GET /api/v1/companies/:companyId/search?q=...`, with optional `mode=full_text|semantic|hybrid`, `formType`, `sectionType`, `filedAfter`, `filedBefore`, and `limit`.
 
@@ -35,10 +35,18 @@ AI_MODE=local
 AI_CHAT_PROVIDER=ollama
 AI_CHAT_BASE_URL=http://ollama:11434
 AI_CHAT_MODEL=qwen2.5:3b
+AI_CHAT_CONTEXT_WINDOW=8192
+AI_CHAT_MAX_OUTPUT_TOKENS=1024
 AI_EMBEDDING_PROVIDER=ollama
 AI_EMBEDDING_BASE_URL=http://ollama:11434
 AI_EMBEDDING_MODEL=nomic-embed-text
 ```
+
+OpenAI-compatible chat and embedding endpoints can be selected instead. External
+corpus embedding is estimate-and-confirm: work cannot start until the displayed
+profile and corpus fingerprint are explicitly approved. Submitting a question
+authorizes sending only its bounded evidence package to the configured chat
+provider.
 
 For CPU-only use, start the profile:
 

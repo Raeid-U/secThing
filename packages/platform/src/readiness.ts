@@ -48,15 +48,16 @@ export async function assessWorkerReadiness(config: PlatformConfig): Promise<Rea
 }
 
 export function capabilities(config: PlatformConfig) {
+  const groundedQuestions = config.aiMode !== "disabled" && Boolean(config.aiChatProvider && config.aiChatBaseUrl && config.aiChatModel);
   return {
     companyIngestion: Boolean(config.secUserAgent),
     filingSearch: true,
     filingSearchUi: true,
     semanticSearch: Boolean(embeddingSettings(config)),
-    ragChat: false,
+    ragChat: groundedQuestions,
     aiMode: config.aiMode,
     localOnly: config.localOnly,
-    phase: 6,
+    phase: 9,
     phaseStatus: "in_progress",
   };
 }

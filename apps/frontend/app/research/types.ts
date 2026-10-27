@@ -51,6 +51,7 @@ export type Hit = {
   chunk_id: string;
   filing_id: string;
   document_id: string;
+  normalized_document_id: string;
   text_hash: string;
   start_offset: number;
   end_offset: number;
@@ -95,6 +96,7 @@ export type Location = {
   hash: string;
   start: string;
   end: string;
+  generation: string;
 };
 export const emptyLocation: Location = {
   document: "",
@@ -109,6 +111,34 @@ export const emptyLocation: Location = {
   hash: "",
   start: "",
   end: "",
+  generation: "",
+};
+
+export type CorpusStatus = {
+  readiness: "processing" | "ready" | "ready_with_exclusions";
+  stageCounts: Record<string, number>;
+  structuredFactsComplete: boolean;
+  exclusions: Array<{ id: string; document_name: string; exclusion_reason: string; retryable: boolean }>;
+  failures: Array<{ id: string; work_type: string; error_message: string }>;
+  coverage: { earliestFilingDate: string | null; latestFilingDate: string | null; supportedFilings: number; missingManifests: number };
+  externalEmbeddingEstimate: null | { profileKey: string; corpusFingerprint: string; documentCount: number; tokenEstimate: number };
+};
+
+export type AnswerCitation = {
+  label: string;
+  kind: "chunk" | "financial_fact";
+  text: string;
+  locator: { filingId?: string; documentId?: string; normalizedDocumentId?: string; textHash?: string; startOffset?: number; endOffset?: number; pageStart?: number; pageEnd?: number; accessionNumber?: string; formType?: string };
+};
+export type GroundedAnswerResponse = {
+  status: "answered" | "insufficient_evidence" | "generation_limited";
+  findings: Array<{ statement: string; citations: string[] }>;
+  interpretation: Array<{ statement: string; citations: string[] }>;
+  limitations: string[];
+  citations: AnswerCitation[];
+  coverage: Record<string, unknown>;
+  modelRunId: string | null;
+  externalDisclosure: string | null;
 };
 
 export async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -126,6 +156,11 @@ export const post = (body?: unknown): RequestInit => ({
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       }),
+});
+export const del = (body: unknown): RequestInit => ({
+  method: "DELETE",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
 });
 export const dateLabel = (value: string) => value?.slice(0, 10) ?? "";
 export function filingState(filing: Filing) {

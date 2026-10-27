@@ -106,6 +106,7 @@ export function useWorkspace() {
     const params = new URLSearchParams();
     if (location.hash) params.set("textHash", location.hash);
     if (location.document) params.set("documentId", location.document);
+    if (location.generation) params.set("normalizedDocumentId", location.generation);
     void request<Reader>(
       `/api/v1/filings/${location.filing}/parsed?${params}`,
       { signal: controller.signal },
@@ -117,7 +118,7 @@ export function useWorkspace() {
         if (!controller.signal.aborted) setReaderError(e.message);
       });
     return () => controller.abort();
-  }, [location.filing, location.hash, location.document, revision]);
+  }, [location.filing, location.hash, location.document, location.generation, revision]);
 
   useEffect(() => {
     setHits([]);

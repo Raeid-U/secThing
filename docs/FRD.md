@@ -524,7 +524,13 @@ The pipeline must download the primary document for supported forms.
 
 ### FRD-DL-004: Exhibit Preservation
 
-MVP should preserve document metadata for exhibits and may download selected exhibits later. MVP parsing can focus on the primary document.
+For supported 10-K, 10-Q, and 8-K form families, including amendments, the
+authoritative filing-index manifest must classify every directory artifact. The
+evidence corpus must download and parse the primary HTML, text, or PDF filing and
+all human-readable exhibits. Images, stylesheets, viewer assets, and technical
+XBRL schema/support files must be retained as manifest metadata with an explicit
+exclusion reason, without retaining unusable bodies. SEC companyfacts/XBRL data
+must enter through the structured-fact pipeline rather than the narrative parser.
 
 ### FRD-DL-005: Source Integrity
 
@@ -545,6 +551,9 @@ Classify filing documents by type:
 - XBRL artifact;
 - image/binary;
 - unknown.
+
+Classification must distinguish human-readable exhibits from technical XBRL and
+presentation support artifacts before download.
 
 ### FRD-DOC-003: Unsupported Document Handling
 
@@ -578,6 +587,10 @@ Parser output:
 ### FRD-PARSE-003: HTML/Text Support
 
 MVP parser must support modern HTML filings and plain-text filings enough to extract readable text. Older or malformed filings may partially fail with observable errors.
+
+The parser must also extract readable text from in-scope PDF evidence. PDF source
+provenance must retain one-based page numbers together with normalized offsets so
+a citation can reopen the exact retained evidence generation and page.
 
 ### FRD-PARSE-004: Reproducible Parser Versions
 
@@ -946,11 +959,11 @@ Minimum fields:
 
 RAG answers must be generated into a structured schema that separates:
 
-- answer text;
-- cited claims;
-- citations;
-- unsupported notes;
+- sourced factual findings;
+- clearly labeled interpretation derived from those findings;
 - limitations.
+
+Every factual or interpretive statement must carry one or more citation labels.
 
 ### FRD-CITE-003: Citation Validation
 
@@ -1654,6 +1667,12 @@ Concurrency must be configurable separately for:
 
 Transient failures should retry with backoff. Deterministic failures should become failed with error details.
 
+Each in-scope document must progress through `discovered`, `downloaded`, `parsed`,
+`chunked`, and `embedded`. After three unsuccessful processing attempts, the
+document must be automatically excluded with its stage and reason disclosed. That
+exclusion counts toward operational completeness and remains manually retryable;
+a retry clears the exclusion and starts a new bounded attempt sequence.
+
 ### FRD-RESUME-001: Resume on Restart
 
 After restart, incomplete work with expired leases must become retryable. Completed work must remain complete.
@@ -1680,6 +1699,17 @@ Progress response must include:
 - last error;
 - partial availability flags.
 
+Corpus readiness is `ready` only when every in-scope document is indexed under the
+active parser, chunking, and embedding profiles, structured financial-fact
+ingestion has completed, and any required external embedding estimate has been
+approved for the exact corpus generation and profile. It is
+`ready_with_exclusions` under the same conditions when one or more documents were
+auto-excluded. Search remains available throughout processing; generated answers
+must return a conflict response until either ready state is reached. Local Ollama
+embedding work requires no approval. Paid/external corpus embedding must first
+publish a document/token estimate and wait for explicit approval tied to that
+estimate, profile, and corpus generation.
+
 ## 50. API Interface Families
 
 Exact routes may change, but the interface must cover these families.
@@ -1691,6 +1721,16 @@ Companies:
 - get company;
 - refresh company;
 - get company status.
+- delete a company's corpus while retaining its identity;
+- delete a company and all company-scoped research data.
+
+Destructive company-data operations must require explicit scope-specific
+confirmation, cancel/remove active company work transactionally, and remove every
+company-scoped filing, retained evidence generation, embedding, structured fact,
+approval, and model-run audit in the selected scope. Corpus-only deletion must
+clear requested coverage so the retained identity can be ingested again. Evidence
+files under the configured data directory may be unlinked only after no remaining
+database record references the path.
 
 Filings:
 
@@ -1814,6 +1854,7 @@ AI_CHAT_BASE_URL=
 AI_CHAT_API_KEY=
 AI_CHAT_MODEL=
 AI_CHAT_CONTEXT_WINDOW=
+AI_CHAT_MAX_OUTPUT_TOKENS=
 AI_EMBEDDING_PROVIDER=
 AI_EMBEDDING_BASE_URL=
 AI_EMBEDDING_API_KEY=
@@ -2570,6 +2611,13 @@ Implementation scope:
 - citation validator;
 - unsupported-answer behavior;
 - chat UI/source panel.
+- a single current question/answer in client state, without durable conversation
+  history;
+- model-run audit records containing provider/model, prompt/schema versions,
+  evidence generations and cited IDs, token estimates, raw structured output,
+  validation result, latency, and timestamps;
+- one retry for malformed or citation-invalid structured output, followed by an
+  evidence-only response with an explicit generation limitation.
 
 Explicit non-scope:
 
@@ -2731,4 +2779,3 @@ Future phases depend on:
 8. Should amendments be included in default analysis, displayed only, or used to supersede prior filings in MVP?
 9. What is the intended meaning of "OKF" from early notes? No technical decision depends on it yet.
 10. Which deployment path should be officially documented for Apple Silicon local AI first: host Ollama, external endpoint, or another runtime?
-

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, loadConfig, parseFilingSource, Retrieval, WorkQueue, LeaseLostError } from "@secthing/platform";
+import { applyMigrations, backfillSearchIndex, chunkDocument, connectDatabase, CorpusCatalog, loadConfig, parseFilingSource, Retrieval, WorkQueue, LeaseLostError } from "@secthing/platform";
 import { buildServer } from "../apps/backend/src/server.js";
 import { post } from "../apps/frontend/app/research/types.js";
 
@@ -18,6 +18,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
   let dataDir: string;
   let item: { job_id: number; company_id: number; filing_id: number; document_id: number };
   let app: ReturnType<typeof buildServer>;
+  let questionApp: ReturnType<typeof buildServer>;
 
   beforeAll(async () => {
     await admin.begin(async (tx) => {
@@ -28,10 +29,17 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await applyMigrations(sql);
     dataDir = await mkdtemp(join(tmpdir(), "secthing-evidence-test-"));
     app = buildServer(loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, SEC_USER_AGENT: "secThing test test@example.com" }));
+    questionApp = buildServer(loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, SEC_USER_AGENT: "secThing test test@example.com",
+      AI_MODE: "local", AI_CHAT_PROVIDER: "ollama", AI_CHAT_BASE_URL: "http://fixture", AI_CHAT_MODEL: "fixture-chat",
+      AI_EMBEDDING_PROVIDER: "ollama", AI_EMBEDDING_BASE_URL: "http://fixture", AI_EMBEDDING_MODEL: "fixture-embed", AI_EMBEDDING_DIMENSION: "2" }), {
+      embeddings: { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) },
+      chat: { chat: async (request) => ({ model: request.model, content: JSON.stringify({ findings: [{ statement: "Orchard revenue grew.", citations: ["C1"] }], interpretation: [], limitations: [] }) }) },
+    });
   }, 30_000);
 
   afterAll(async () => {
     await app?.close();
+    await questionApp?.close();
     await sql.end();
     await admin.unsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.end();
@@ -78,15 +86,21 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(excluded.json().results).toEqual([]);
   });
 
-  it("reparses indexed evidence without foreign-key failures and removes obsolete search results", async () => {
+  it("reparses into a new generation, hides obsolete search results, and retains old citations", async () => {
     await parseAndIndex();
     await source("Cobalt production increased.");
     await parseFilingSource(sql, { dataDir }, item);
-    expect(await sql`SELECT id FROM chunks`).toHaveLength(0);
+    expect(await sql`SELECT id FROM chunks`).toHaveLength(1);
     await chunkDocument(sql, item);
-    expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'orchard')`).toHaveLength(0);
+    expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'orchard')`).toHaveLength(1);
     expect(await sql`SELECT id FROM chunks WHERE search_vector @@ plainto_tsquery('english', 'cobalt')`).toHaveLength(1);
-    expect(await sql`SELECT id FROM source_spans WHERE span_kind = 'chunk'`).toHaveLength(1);
+    expect(await sql`SELECT id FROM source_spans WHERE span_kind = 'chunk'`).toHaveLength(2);
+    expect((await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=orchard` })).json().results).toEqual([]);
+    const generations = await sql`SELECT id, generation, status FROM normalized_documents ORDER BY generation`;
+    expect(generations).toMatchObject([{ generation: 1, status: "superseded" }, { generation: 2, status: "parsed" }]);
+    const reopened = await app.inject({ url: `/api/v1/filings/${item.filing_id}/parsed?normalizedDocumentId=${generations[0].id}` });
+    expect(reopened.statusCode).toBe(200);
+    expect(reopened.json().text).toContain("Orchard");
   });
 
   it("indexes preamble evidence and quarterly sections with exact source offsets", async () => {
@@ -111,8 +125,8 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
   it("queues parser upgrades once and rebuilds the search index from preserved sources", async () => {
     await parseAndIndex();
     await sql`UPDATE normalized_documents SET parser_version = 'html-text-v1'`;
-    await sql`INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status)
-      SELECT document_id, 'older-parser', source_content_hash, normalized_text_path, text_hash, text_length, status FROM normalized_documents`;
+    await sql`INSERT INTO normalized_documents (document_id, parser_version, source_content_hash, normalized_text_path, text_hash, text_length, status, generation)
+      SELECT document_id, 'older-parser', source_content_hash, normalized_text_path, text_hash, text_length, 'superseded', generation + 1 FROM normalized_documents`;
     expect((await app.inject({ url: `/api/v1/companies/${item.company_id}/search?q=orchard` })).json().results).toEqual([]);
     const results = await Promise.all([backfillSearchIndex(sql), backfillSearchIndex(sql)]);
     expect(results.reduce((sum, r) => sum + r.queued, 0)).toBe(1);
@@ -122,7 +136,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect((await backfillSearchIndex(sql)).queued).toBe(0);
   });
 
-  it("supersedes prior parser versions and removes their evidence references", async () => {
+  it("supersedes prior parser versions while retaining their evidence references", async () => {
     await parseAndIndex();
     await sql`UPDATE normalized_documents SET parser_version = 'retired-parser'`;
     await parseFilingSource(sql, { dataDir }, item);
@@ -130,7 +144,7 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(await sql`SELECT id FROM normalized_documents WHERE status = 'parsed'`).toHaveLength(1);
     expect(await sql`SELECT id FROM normalized_documents WHERE status = 'superseded'`).toHaveLength(1);
     expect(await sql`SELECT id FROM source_spans WHERE normalized_document_id IN
-      (SELECT id FROM normalized_documents WHERE status = 'superseded')`).toHaveLength(0);
+      (SELECT id FROM normalized_documents WHERE status = 'superseded')`).not.toHaveLength(0);
   });
 
   it("keeps the prior evidence intact when persistence fails mid-reparse", async () => {
@@ -269,6 +283,91 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     await expect(retrieval.search(item.company_id, "orchard", "semantic", { limit: 10 })).rejects.toThrow();
   });
 
+  it("packages neighboring passages and disclosed corpus coverage", async () => {
+    await source(`${"Context before the result. ".repeat(75)}\n\nNeedlemetric changed during the period.\n\n${"Context after the result. ".repeat(75)}`);
+    await parseAndIndex();
+    await sql`INSERT INTO filing_documents (filing_id, document_name, document_type, content_type, sec_url, status, stage, exclusion_reason)
+      VALUES (${item.filing_id}, 'technical.xsd', 'xbrl_technical', 'application/xml', 'https://www.sec.gov/technical.xsd',
+        'excluded', 'excluded', 'technical_xbrl_support')`;
+    const evidence = await new Retrieval(sql, loadConfig({ DATABASE_URL: scopedUrl.toString() }))
+      .evidencePackage(item.company_id, "What changed about needlemetric?", { maxInputTokens: 4_000 });
+    expect(evidence.sources.filter((entry) => entry.kind === "chunk").length).toBeGreaterThan(1);
+    expect(evidence.coverage).toMatchObject({ retrievalMode: "full_text", supportedFilings: 1,
+      excludedDocumentCount: 1, excludedDocuments: [{ documentName: "technical.xsd", reason: "technical_xbrl_support" }] });
+  });
+
+  it("binds external embedding approval to the exact profile and corpus fingerprint", async () => {
+    await parseAndIndex();
+    const config = loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir, AI_MODE: "external", LOCAL_ONLY: "false",
+      AI_EMBEDDING_PROVIDER: "openai_compatible", AI_EMBEDDING_BASE_URL: "https://embedding.example.test",
+      AI_EMBEDDING_MODEL: "external-fixture", AI_EMBEDDING_DIMENSION: "2" });
+    const retrieval = new Retrieval(sql, config, { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) });
+    const corpus = new CorpusCatalog(sql, config, retrieval);
+    expect(await retrieval.queue(item.company_id)).toMatchObject({ queued: 0, approvalRequired: true });
+    const estimate = (await corpus.embeddingEstimate(item.company_id))!;
+    expect(await corpus.approveEmbeddings(item.company_id, "stale-fingerprint", estimate.profileKey)).toBeNull();
+    expect(await corpus.approveEmbeddings(item.company_id, estimate.corpusFingerprint, estimate.profileKey)).toEqual(estimate);
+    expect(await retrieval.queue(item.company_id)).toMatchObject({ queued: 1 });
+
+    await source("A changed evidence generation invalidates the prior estimate.");
+    await parseAndIndex();
+    expect(await retrieval.queue(item.company_id)).toMatchObject({ queued: 0, approvalRequired: true });
+    expect((await corpus.embeddingEstimate(item.company_id))?.corpusFingerprint).not.toBe(estimate.corpusFingerprint);
+  });
+
+  it("blocks questions until corpus readiness, then audits a citation-safe grounded answer", async () => {
+    await parseAndIndex();
+    const init = post({ question: "What happened to orchard revenue?" });
+    const blocked = await questionApp.inject({ method: "POST", url: `/api/v1/companies/${item.company_id}/questions`,
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toMatchObject({ corpus: { readiness: "processing" } });
+    await sql`INSERT INTO companyfacts_sources (company_id, sec_url, body_path, content_hash) VALUES
+      (${item.company_id}, 'https://data.sec.gov/companyfacts.json', '/fixture/companyfacts.json', 'fixture-facts')`;
+    await semantic(undefined, { AI_EMBEDDING_DIMENSION: "2" }).embedDocument(item.document_id);
+    const corpus = await questionApp.inject({ url: `/api/v1/companies/${item.company_id}/corpus` });
+    expect(corpus.json()).toMatchObject({ readiness: "ready", structuredFactsComplete: true, stageCounts: { embedded: 1 } });
+    const answered = await questionApp.inject({ method: "POST", url: `/api/v1/companies/${item.company_id}/questions`,
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });
+    expect(answered.statusCode).toBe(200);
+    expect(answered.json()).toMatchObject({ status: "answered", findings: [{ citations: ["C1"] }], citations: [{ label: "C1", locator: { normalizedDocumentId: expect.any(String) } }], modelRunId: expect.any(String) });
+    expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "valid", cited_source_ids: ["C1"] }]);
+  });
+
+  it("deletes a corpus transactionally while retaining a re-ingestable company identity", async () => {
+    await sql`UPDATE companies SET earliest_requested_filing_date = '2023-01-01', latest_requested_filing_date = '2026-01-01',
+      requested_lookback = '3' WHERE id = ${item.company_id}`;
+    await parseAndIndex();
+    const normalizedPath = (await sql`SELECT normalized_text_path FROM normalized_documents WHERE document_id = ${item.document_id}`)[0].normalized_text_path as string;
+    const factsPath = join(dataDir, "companyfacts-delete-fixture.json");
+    await writeFile(factsPath, "{}");
+    await sql`INSERT INTO companyfacts_sources (company_id, sec_url, body_path, content_hash)
+      VALUES (${item.company_id}, 'https://data.sec.gov/delete-fixture.json', ${factsPath}, 'delete-fixture')`;
+    const response = await app.inject({ method: "DELETE", url: `/api/v1/companies/${item.company_id}/corpus`,
+      headers: { "content-type": "application/json" }, payload: JSON.stringify({ confirmation: "DELETE CORPUS" }) });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ companyDeleted: false, filingsDeleted: 1, documentsDeleted: 1, jobsDeleted: 1 });
+    expect(await sql`SELECT id FROM companies WHERE id = ${item.company_id}`).toHaveLength(1);
+    expect(await sql`SELECT id FROM filings WHERE company_id = ${item.company_id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM jobs WHERE company_id = ${item.company_id}`).toHaveLength(0);
+    expect(await sql`SELECT earliest_requested_filing_date, latest_requested_filing_date, requested_lookback FROM companies WHERE id = ${item.company_id}`)
+      .toEqual([{ earliest_requested_filing_date: null, latest_requested_filing_date: null, requested_lookback: null }]);
+    await expect((await import("node:fs/promises")).access(normalizedPath)).rejects.toThrow();
+    await expect((await import("node:fs/promises")).access(factsPath)).rejects.toThrow();
+  });
+
+  it("requires the exact legal name before deleting a company and its corpus", async () => {
+    const rejected = await app.inject({ method: "DELETE", url: `/api/v1/companies/${item.company_id}`,
+      headers: { "content-type": "application/json" }, payload: JSON.stringify({ confirmation: "Fixture" }) });
+    expect(rejected.statusCode).toBe(409);
+    const deleted = await app.inject({ method: "DELETE", url: `/api/v1/companies/${item.company_id}`,
+      headers: { "content-type": "application/json" }, payload: JSON.stringify({ confirmation: "Fixture Inc" }) });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toMatchObject({ companyDeleted: true });
+    expect(await sql`SELECT id FROM companies WHERE id = ${item.company_id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM jobs WHERE id = ${item.job_id}`).toHaveLength(0);
+  });
+
   it("rejects incompatible/nonfinite/zero vectors without persisting them", async () => {
     await parseAndIndex();
     for (const vector of [[1, 2, 3], [NaN, 1], [0, 0]]) {
@@ -278,16 +377,18 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(0);
   });
 
-  it("invalidates vectors on reparse and does not reuse a different model profile", async () => {
+  it("retires vectors from active retrieval without deleting old generations or reusing another profile", async () => {
     await parseAndIndex();
     const retrieval = semantic();
     await retrieval.embedDocument(item.document_id);
     expect((await semantic(undefined, { AI_EMBEDDING_MODEL: "different-embed" }).status(item.company_id)).embedded).toBe(0);
     await source("Cobalt demand rose.");
     await parseAndIndex();
-    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(0);
+    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(1);
+    expect((await retrieval.status(item.company_id)).embedded).toBe(0);
     await retrieval.embedDocument(item.document_id);
     expect((await retrieval.status(item.company_id)).embedded).toBe(1);
+    expect(await sql`SELECT * FROM chunk_embeddings`).toHaveLength(2);
   });
 
   it("does not persist an in-flight embedding against a retired chunk generation", async () => {

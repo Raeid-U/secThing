@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { buildServer } from "../apps/backend/src/server.js";
 import { post } from "../apps/frontend/app/research/types.js";
+import { capabilities, loadConfig } from "@secthing/platform";
 
 const app = buildServer({
   databaseUrl: "postgresql://user:pass@localhost:5432/secthing",
@@ -22,7 +23,13 @@ describe("backend health", () => {
   it("advertises current capability state", async () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/system/capabilities" });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ phase: 6, companyIngestion: false, filingSearch: true, ragChat: false });
+    expect(response.json()).toMatchObject({ phase: 9, companyIngestion: false, filingSearch: true, ragChat: false });
+  });
+
+  it("advertises grounded questions only for a complete chat configuration", () => {
+    const configured = loadConfig({ DATABASE_URL: "postgresql://user:pass@localhost:5432/secthing", AI_MODE: "local",
+      AI_CHAT_PROVIDER: "ollama", AI_CHAT_BASE_URL: "http://ollama:11434", AI_CHAT_MODEL: "fixture-chat" });
+    expect(capabilities(configured)).toMatchObject({ phase: 9, ragChat: true });
   });
 
   it("reports disabled AI without contacting a runtime", async () => {

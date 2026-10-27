@@ -6,6 +6,9 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import {
   Retrieval,
+  CorpusCatalog,
+  CompanyDataLifecycle,
+  GroundedAnswer,
   chunkingProfileVersion,
   assessReadiness,
   backfillSearchIndex,
@@ -16,6 +19,8 @@ import {
   loadConfig,
   type PlatformConfig,
   verifyAiChat,
+  type ChatProvider,
+  type EmbeddingProvider,
 } from "@secthing/platform";
 
 function isoDate(value: string | Date | null): string | undefined {
@@ -25,10 +30,13 @@ function isoDate(value: string | Date | null): string | undefined {
     : value.toISOString().slice(0, 10);
 }
 
-export function buildServer(config: PlatformConfig = loadConfig()) {
+export function buildServer(config: PlatformConfig = loadConfig(), providers: { chat?: ChatProvider; embeddings?: EmbeddingProvider } = {}) {
   const app = Fastify({ logger: true });
   const sql = connectDatabase(config.databaseUrl);
-  const retrieval = new Retrieval(sql, config);
+  const retrieval = new Retrieval(sql, config, providers.embeddings);
+  const corpus = new CorpusCatalog(sql, config, retrieval);
+  const companyData = new CompanyDataLifecycle(sql, config);
+  const groundedAnswer = new GroundedAnswer(sql, config, providers.chat, retrieval);
   app.register(cors, { origin: true });
   app.addHook("onClose", async () => sql.end({ timeout: 5 }));
 
@@ -327,6 +335,72 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     }
   });
 
+  app.get("/api/v1/companies/:companyId/corpus", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    if (!id.success) return reply.code(400).send({ error: "Company id must be a positive integer." });
+    if (!(await sql`SELECT id FROM companies WHERE id = ${id.data}`)[0]) return reply.code(404).send({ error: "Company not found." });
+    return { ...(await corpus.status(id.data)), externalEmbeddingEstimate: config.aiMode === "external" ? await corpus.embeddingEstimate(id.data) : null };
+  });
+
+  app.delete("/api/v1/companies/:companyId/corpus", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ confirmation: z.literal("DELETE CORPUS") }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "Type DELETE CORPUS to confirm evidence deletion." });
+    const result = await companyData.deleteCorpus(id.data);
+    if (!result) return reply.code(404).send({ error: "Company not found." });
+    return { ...result, message: "The evidence corpus was deleted. The company remains in your library; use Add company to choose coverage and ingest it again." };
+  });
+
+  app.delete("/api/v1/companies/:companyId", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ confirmation: z.string().min(1).max(500) }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "The company name is required to confirm deletion." });
+    const company = await companyData.company(id.data);
+    if (!company) return reply.code(404).send({ error: "Company not found." });
+    if (body.data.confirmation !== company.legal_name)
+      return reply.code(409).send({ error: `Type ${company.legal_name} exactly to confirm company deletion.` });
+    const result = await companyData.deleteCompany(id.data);
+    if (!result) return reply.code(404).send({ error: "Company not found." });
+    return { ...result, message: "The company and its evidence were deleted." };
+  });
+
+  app.post("/api/v1/companies/:companyId/corpus/retry", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ documentIds: z.array(z.coerce.number().int().positive()).max(100).optional() }).safeParse(request.body ?? {});
+    if (!id.success || !body.success) return reply.code(400).send({ error: "Valid company and optional document ids are required." });
+    const result = await corpus.retry(id.data, body.data.documentIds);
+    return reply.code(result.queued ? 202 : 200).send(result);
+  });
+
+  app.post("/api/v1/companies/:companyId/embeddings/approve", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ corpusFingerprint: z.string().min(1), profileKey: z.string().min(1) }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "The current corpus fingerprint and profile key are required." });
+    if (config.aiMode !== "external") return reply.code(409).send({ error: "Approval is only required for external embeddings." });
+    const approved = await corpus.approveEmbeddings(id.data, body.data.corpusFingerprint, body.data.profileKey);
+    if (!approved) return reply.code(409).send({ error: "The estimate is stale. Refresh corpus status before approving." });
+    const queued = await retrieval.queue(id.data, true);
+    return reply.code(202).send({ approved, ...queued });
+  });
+
+  app.post("/api/v1/companies/:companyId/questions", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ question: z.string().trim().min(2).max(2_000) }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "A valid company and question are required." });
+    const company = await sql`SELECT id FROM companies WHERE id = ${id.data}`;
+    if (!company[0]) return reply.code(404).send({ error: "Company not found." });
+    const status = await corpus.status(id.data);
+    if (status.readiness !== "ready" && status.readiness !== "ready_with_exclusions")
+      return reply.code(409).send({ error: "The filing corpus is not operationally complete yet.", corpus: status });
+    if (!config.aiChatProvider || !config.aiChatBaseUrl || !config.aiChatModel)
+      return reply.code(503).send({ error: "A chat provider and model must be configured for grounded questions." });
+    try {
+      return { ...(await groundedAnswer.answer(id.data, body.data.question)), externalDisclosure: config.aiMode === "external" ? "The bounded evidence package for this question was sent to the configured external chat provider." : null };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Grounded answer generation failed." });
+    }
+  });
+
   app.post(
     "/api/v1/companies/:companyId/search/reindex",
     async (request, reply) => {
@@ -517,6 +591,7 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
     const readerQuery = z
       .object({
         documentId: z.coerce.number().int().positive().optional(),
+        normalizedDocumentId: z.coerce.number().int().positive().optional(),
         textHash: z.string().optional(),
       })
       .safeParse(request.query);
@@ -545,10 +620,12 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
       FROM normalized_documents
       JOIN filing_documents ON filing_documents.id = normalized_documents.document_id
       JOIN filings ON filings.id = filing_documents.filing_id
-      WHERE filings.id = ${id.data} AND normalized_documents.status = 'parsed'
+      WHERE filings.id = ${id.data}
         AND (${readerQuery.data.documentId ?? null}::bigint IS NULL OR filing_documents.id = ${readerQuery.data.documentId ?? null})
-        AND normalized_documents.parser_version = ${filingParserVersion}
-        AND normalized_documents.source_content_hash = filing_documents.content_hash
+        AND ((${readerQuery.data.normalizedDocumentId ?? null}::bigint IS NOT NULL AND normalized_documents.id = ${readerQuery.data.normalizedDocumentId ?? null}) OR
+          (${readerQuery.data.normalizedDocumentId ?? null}::bigint IS NULL AND normalized_documents.status = 'parsed'
+            AND normalized_documents.parser_version = ${filingParserVersion}
+            AND normalized_documents.source_content_hash = filing_documents.content_hash))
       ORDER BY normalized_documents.parsed_at DESC, normalized_documents.id DESC LIMIT 1
     `;
       const document = documents[0];
@@ -576,7 +653,8 @@ export function buildServer(config: PlatformConfig = loadConfig()) {
                 "Extracted evidence integrity check failed. Reparse this source.",
             });
         const sections = await tx`
-        SELECT filing_sections.id, section_type, section_label, confidence_status, source_spans.start_offset, source_spans.end_offset
+        SELECT filing_sections.id, section_type, section_label, confidence_status, source_spans.start_offset, source_spans.end_offset,
+          source_spans.page_start, source_spans.page_end
         FROM filing_sections JOIN source_spans ON source_spans.id = filing_sections.source_span_id
         WHERE filing_sections.document_id = ${document.document_id} AND source_spans.normalized_document_id = ${document.normalized_document_id}
         ORDER BY source_spans.start_offset

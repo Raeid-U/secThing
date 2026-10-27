@@ -4,6 +4,7 @@ import {
   Retrieval,
   WorkQueue,
   LeaseLostError,
+  excludeTerminalDocument,
   type ClaimedWork,
   backfillSearchIndex,
   chunkDocument,
@@ -11,8 +12,10 @@ import {
   connectDatabase,
   assessWorkerReadiness,
   filingParserVersion,
+  filingArchiveDirectoryUrl,
   isSupportedMvpForm,
   loadConfig,
+  persistCompanyFacts,
   SecClient,
   type CompanySubmission,
 } from "@secthing/platform";
@@ -172,13 +175,27 @@ async function fetchMetadata(item: WorkItem): Promise<void> {
   await queue.transaction(item, async (sql) => {
     const counts = await persistSubmission(sql, company, submission, startDate);
     const queued = await queueSourceAcquisition(sql, item.job_id, company.id);
+    await sql`INSERT INTO work_items (job_id, work_type, company_id, input)
+      SELECT ${item.job_id}, 'fetch_companyfacts', ${company.id}, '{}'::jsonb
+      WHERE NOT EXISTS (SELECT 1 FROM work_items WHERE job_id = ${item.job_id} AND work_type = 'fetch_companyfacts')`;
     await sql`
       UPDATE jobs
-      SET status = ${queued > 0 ? "running" : "complete"},
+      SET status = 'running',
           progress = ${sql.json({ identity: "complete", metadata: "complete", filings: { discovered: counts.discovered, total: counts.total }, sourceAcquisition: { status: queued > 0 ? "queued" : "not_applicable", queued, complete: 0, failed: 0 }, parsing: "not_started", chunking: "not_started" })},
           updated_at = now()
       WHERE id = ${item.job_id}
     `;
+  });
+}
+
+async function fetchCompanyFacts(item: WorkItem): Promise<void> {
+  if (!item.company_id) throw new Error("Companyfacts work item is missing a company.");
+  const companies = await sql<Company[]>`SELECT id, cik FROM companies WHERE id = ${item.company_id}`;
+  if (!companies[0]) throw new Error("Company no longer exists.");
+  const result = await sec.fetchCompanyFacts(companies[0].cik);
+  await queue.transaction(item, async (tx) => {
+    await storeResponse(tx, result.response);
+    await persistCompanyFacts(tx, companies[0].id, result.response, result.body);
   });
 }
 
@@ -218,25 +235,54 @@ async function acquireFilingSource(item: WorkItem): Promise<void> {
   `;
   const filing = filings[0];
   if (!filing) throw new Error("Filing no longer exists.");
-  const document = await sec.acquirePrimaryFiling({
+  const input = {
     cik: filing.cik,
     accessionNumber: filing.accession_number,
     formType: filing.form_type,
     primaryDocument: filing.primary_document ?? undefined,
+  };
+  const discovery = await sec.discoverFilingManifest(input);
+  await queue.transaction(item, async (transaction) => {
+    await storeResponse(transaction, discovery.indexResponse);
+    await transaction`DELETE FROM filing_documents WHERE filing_id = ${filing.id} AND document_name = '__manifest__' AND document_type = 'manifest_failure'`;
+    for (const entry of discovery.manifest) {
+      const url = `${filingArchiveDirectoryUrl(filing.cik, filing.accession_number)}/${encodeURIComponent(entry.documentName)}`;
+      await transaction`
+        INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, byte_size,
+          status, stage, excluded_at, exclusion_reason, retryable)
+        VALUES (${filing.id}, ${entry.documentName}, ${entry.classification}, ${url}, ${entry.byteSize ?? null},
+          ${entry.included ? "discovered" : "excluded"}, ${entry.included ? "discovered" : "excluded"},
+          ${entry.included ? null : new Date()}, ${entry.exclusionReason ?? null}, ${entry.included})
+        ON CONFLICT (filing_id, document_name) DO UPDATE SET
+          document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url,
+          byte_size = COALESCE(filing_documents.byte_size, EXCLUDED.byte_size),
+          status = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.status ELSE EXCLUDED.status END,
+          stage = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.stage ELSE EXCLUDED.stage END,
+          excluded_at = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.excluded_at ELSE EXCLUDED.excluded_at END,
+          exclusion_reason = CASE WHEN filing_documents.content_hash IS NOT NULL AND EXCLUDED.stage = 'discovered' THEN filing_documents.exclusion_reason ELSE EXCLUDED.exclusion_reason END,
+          retryable = EXCLUDED.retryable, last_error = NULL, updated_at = now()
+      `;
+    }
   });
-  await queue.transaction(item, async (sql) => {
-    await storeResponse(sql, document.indexResponse);
-    const documents = await sql<{ id: number }[]>`
-      INSERT INTO filing_documents (filing_id, document_name, document_type, sec_url, local_path, content_type, content_hash, byte_size, status, fetched_at)
-      VALUES (${filing.id}, ${document.documentName}, ${document.documentType}, ${document.url}, ${document.bodyPath}, ${document.contentType}, ${document.contentHash}, ${document.byteSize}, 'downloaded', now())
-      ON CONFLICT (filing_id, document_name) DO UPDATE SET
-        document_type = EXCLUDED.document_type, sec_url = EXCLUDED.sec_url, local_path = EXCLUDED.local_path,
-        content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, byte_size = EXCLUDED.byte_size,
-        status = 'downloaded', last_error = NULL, fetched_at = now(), updated_at = now()
-      RETURNING id
-    `;
-    await sql`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
-    await queueParsing(sql, item.job_id, item.company_id, filing.id, documents[0].id);
+
+  const downloaded = await sql<{ document_name: string }[]>`SELECT document_name FROM filing_documents
+    WHERE filing_id = ${filing.id} AND content_hash IS NOT NULL AND local_path IS NOT NULL`;
+  const downloadedNames = new Set(downloaded.map((document) => document.document_name));
+  for (const entry of discovery.manifest.filter((candidate) => candidate.included && !downloadedNames.has(candidate.documentName))) {
+    const document = await sec.downloadFilingDocument(input, entry, discovery.indexResponse);
+    await queue.transaction(item, async (transaction) => {
+      await transaction`UPDATE filing_documents SET local_path = ${document.bodyPath}, content_type = ${document.contentType},
+        content_hash = ${document.contentHash}, byte_size = ${document.byteSize}, status = 'downloaded', stage = 'downloaded',
+        excluded_at = NULL, exclusion_reason = NULL, retryable = true, last_error = NULL, fetched_at = now(), updated_at = now()
+        WHERE filing_id = ${filing.id} AND document_name = ${entry.documentName}`;
+    });
+  }
+
+  await queue.transaction(item, async (transaction) => {
+    const parseDocuments = await transaction<{ id: number }[]>`SELECT id FROM filing_documents
+      WHERE filing_id = ${filing.id} AND stage = 'downloaded' AND content_hash IS NOT NULL ORDER BY id`;
+    await transaction`UPDATE filings SET filing_status = 'source_acquired', updated_at = now() WHERE id = ${filing.id}`;
+    for (const document of parseDocuments) await queueParsing(transaction, item.job_id, item.company_id, filing.id, document.id);
   });
 }
 
@@ -363,6 +409,7 @@ async function failWork(item: WorkItem, error: unknown): Promise<void> {
       WHERE id = ${item.id}
     `;
     await sql`UPDATE jobs SET status = ${retry ? "running" : "partial"}, last_error = ${message}, updated_at = now() WHERE id = ${item.job_id}`;
+    if (!retry) await excludeTerminalDocument(sql, item, message);
   });
   console.error(
     JSON.stringify({
@@ -410,6 +457,7 @@ const idleLoop = setInterval(() => {
       )
         await resolveCompany(item);
       else if (item.work_type === "fetch_metadata") await fetchMetadata(item);
+      else if (item.work_type === "fetch_companyfacts") await fetchCompanyFacts(item);
       else if (item.work_type === "acquire_filing_source")
         await acquireFilingSource(item);
       else if (item.work_type === "parse_filing_source")
