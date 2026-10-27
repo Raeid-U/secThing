@@ -157,6 +157,11 @@ export const post = (body?: unknown): RequestInit => ({
         body: JSON.stringify(body),
       }),
 });
+export const del = (body: unknown): RequestInit => ({
+  method: "DELETE",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
 export const dateLabel = (value: string) => value?.slice(0, 10) ?? "";
 export function filingState(filing: Filing) {
   if (filing.last_error) return { label: "Needs attention", tone: "warning" };

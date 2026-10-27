@@ -245,6 +245,20 @@
   width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto;
   border: 1px solid #aab9c0; border-radius: 4px; padding: 0; background: var(--surface); box-shadow: 0 20px 65px rgba(23,35,45,.22);
 }
+.research-workspace .manage-company-dialog {
+  width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto;
+  border: 1px solid #aab9c0; border-radius: 4px; padding: 0; background: var(--surface); box-shadow: 0 20px 65px rgba(23,35,45,.22);
+}
+.manage-company-body { padding: 22px; overflow: auto; }
+.manage-intro { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.manage-company-body section { padding: 18px 0; border-top: 1px solid var(--rule); }
+.manage-company-body h3 { margin: 0 0 6px; font-size: 14px; }
+.manage-company-body section p { margin: 0 0 15px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.manage-company-body label { display: grid; gap: 7px; margin-bottom: 12px; color: #42535e; font-size: 11px; }
+.manage-company-body input { width: 100%; padding: 9px 10px; }
+.research-workspace .danger-button { border-color: #a34d45; color: #7d2d27; background: #fff8f7; }
+.research-workspace .danger-button:hover:not(:disabled) { color: white; background: #913d35; }
+.manage-company-body .form-error { margin: 10px 0 0; padding: 10px; color: #81352e; background: #fae9e7; font-size: 12px; }
 .status-dialog-body, .evidence-dialog-body { padding: 22px; overflow: auto; }
 .status-guidance, .status-footnote, .evidence-intro { color: var(--muted); line-height: 1.65; }
 .status-list { margin: 0; padding: 0; list-style: none; }

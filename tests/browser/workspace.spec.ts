@@ -78,6 +78,10 @@ async function fixture(page: Page) {
     )
       body = { outcome: "refresh_queued", companyId: "1", jobId: "1" };
     else if (url.pathname === "/api/v1/companies") body = [company];
+    else if (url.pathname === "/api/v1/companies/1/corpus" && route.request().method() === "DELETE")
+      body = { companyDeleted: false, message: "The evidence corpus was deleted. The company remains in your library." };
+    else if (url.pathname === "/api/v1/companies/1" && route.request().method() === "DELETE")
+      body = { companyDeleted: true, message: "The company and its evidence were deleted." };
     else if (url.pathname.endsWith("/search/reindex")) body = { queued: 0 };
     else if (url.pathname.endsWith("/corpus")) body = {
       readiness: "ready", stageCounts: { embedded: 50 }, structuredFactsComplete: true,
@@ -240,6 +244,21 @@ test("asks a grounded question and opens its exact cited generation", async ({ p
   await page.getByRole("button", { name: new RegExp(`C1.*10-K`) }).click();
   await expect(page).toHaveURL(/generation=1/);
   await expect(page.getByText("Extracted evidence", { exact: true })).toBeVisible();
+});
+
+test("requires explicit confirmation before deleting a corpus", async ({ page }) => {
+  await page.goto("/records?company=1");
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: `Manage ${company.legal_name}` });
+  await expect(dialog).toBeVisible();
+  const remove = dialog.getByRole("button", { name: "Delete evidence corpus" });
+  await expect(remove).toBeDisabled();
+  await dialog.getByLabel(/Type DELETE CORPUS/).fill("DELETE CORPUS");
+  const deletion = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname.endsWith("/corpus"));
+  await remove.click();
+  await deletion;
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("evidence corpus was deleted");
 });
 
 test("guided intake resolves identity, confirms scope, and restores focus", async ({

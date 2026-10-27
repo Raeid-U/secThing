@@ -5,6 +5,7 @@ import { AddCompany } from "./research/add-company";
 import { AskFilings } from "./research/ask-filings";
 import { CompanyLibrary, LibraryHome } from "./research/company-library";
 import { DocumentReader } from "./research/document-reader";
+import { ManageCompany } from "./research/manage-company";
 import { useWorkspace } from "./research/use-workspace";
 import { SystemStatus } from "./system-status";
 import {
@@ -182,6 +183,20 @@ export function CompanyWorkbench() {
     }
   }
 
+  function deleted(scope: "corpus" | "company", message: string) {
+    setNotice(message);
+    setQuery("");
+    setStateFilter("");
+    if (scope === "company") {
+      navigate({ ...emptyLocation });
+      setLibrary(true);
+      requestAnimationFrame(() => document.querySelector<HTMLElement>(".library-home .primary-button")?.focus());
+    } else {
+      navigate({ ...emptyLocation, company: location.company });
+    }
+    refresh();
+  }
+
   return (
     <div
       className={`research-workspace ${library ? "library-open" : ""} ${location.filing ? "inspecting" : ""}`}
@@ -219,6 +234,12 @@ export function CompanyWorkbench() {
         />
       )}
       <main className="workspace-main">
+        {!location.company && notice && (
+          <div className="workspace-notice" role="status">
+            <span>{notice}</span>
+            <button aria-label="Dismiss notification" onClick={() => setNotice("")}>×</button>
+          </div>
+        )}
         {!location.company ? (
           <LibraryHome companies={companies} onAdd={() => setIntake(true)} onOpen={openCompany} />
         ) : (
@@ -251,6 +272,7 @@ export function CompanyWorkbench() {
                 <button onClick={() => void reindex()} disabled={indexing}>
                   {indexing ? "Updating…" : "Update evidence"}
                 </button>
+                {detail && <ManageCompany companyId={location.company} legalName={detail.company.legal_name} onDeleted={deleted} />}
               </div>
             </header>
             <form
