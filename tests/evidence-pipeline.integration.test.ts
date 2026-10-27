@@ -334,6 +334,40 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "valid", cited_source_ids: ["C1"] }]);
   });
 
+  it("deletes a corpus transactionally while retaining a re-ingestable company identity", async () => {
+    await sql`UPDATE companies SET earliest_requested_filing_date = '2023-01-01', latest_requested_filing_date = '2026-01-01',
+      requested_lookback = '3' WHERE id = ${item.company_id}`;
+    await parseAndIndex();
+    const normalizedPath = (await sql`SELECT normalized_text_path FROM normalized_documents WHERE document_id = ${item.document_id}`)[0].normalized_text_path as string;
+    const factsPath = join(dataDir, "companyfacts-delete-fixture.json");
+    await writeFile(factsPath, "{}");
+    await sql`INSERT INTO companyfacts_sources (company_id, sec_url, body_path, content_hash)
+      VALUES (${item.company_id}, 'https://data.sec.gov/delete-fixture.json', ${factsPath}, 'delete-fixture')`;
+    const response = await app.inject({ method: "DELETE", url: `/api/v1/companies/${item.company_id}/corpus`,
+      headers: { "content-type": "application/json" }, payload: JSON.stringify({ confirmation: "DELETE CORPUS" }) });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ companyDeleted: false, filingsDeleted: 1, documentsDeleted: 1, jobsDeleted: 1 });
+    expect(await sql`SELECT id FROM companies WHERE id = ${item.company_id}`).toHaveLength(1);
+    expect(await sql`SELECT id FROM filings WHERE company_id = ${item.company_id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM jobs WHERE company_id = ${item.company_id}`).toHaveLength(0);
+    expect(await sql`SELECT earliest_requested_filing_date, latest_requested_filing_date, requested_lookback FROM companies WHERE id = ${item.company_id}`)
+      .toEqual([{ earliest_requested_filing_date: null, latest_requested_filing_date: null, requested_lookback: null }]);
+    await expect((await import("node:fs/promises")).access(normalizedPath)).rejects.toThrow();
+    await expect((await import("node:fs/promises")).access(factsPath)).rejects.toThrow();
+  });
+
+  it("requires the exact legal name before deleting a company and its corpus", async () => {
+    const rejected = await app.inject({ method: "DELETE", url: `/api/v1/companies/${item.company_id}`,
+      headers: { "content-type": "application/json" }, payload: JSON.stringify({ confirmation: "Fixture" }) });
+    expect(rejected.statusCode).toBe(409);
+    const deleted = await app.inject({ method: "DELETE", url: `/api/v1/companies/${item.company_id}`,
+      headers: { "content-type": "application/json" }, payload: JSON.stringify({ confirmation: "Fixture Inc" }) });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toMatchObject({ companyDeleted: true });
+    expect(await sql`SELECT id FROM companies WHERE id = ${item.company_id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM jobs WHERE id = ${item.job_id}`).toHaveLength(0);
+  });
+
   it("rejects incompatible/nonfinite/zero vectors without persisting them", async () => {
     await parseAndIndex();
     for (const vector of [[1, 2, 3], [NaN, 1], [0, 0]]) {

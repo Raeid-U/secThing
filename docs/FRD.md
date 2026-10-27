@@ -1721,6 +1721,16 @@ Companies:
 - get company;
 - refresh company;
 - get company status.
+- delete a company's corpus while retaining its identity;
+- delete a company and all company-scoped research data.
+
+Destructive company-data operations must require explicit scope-specific
+confirmation, cancel/remove active company work transactionally, and remove every
+company-scoped filing, retained evidence generation, embedding, structured fact,
+approval, and model-run audit in the selected scope. Corpus-only deletion must
+clear requested coverage so the retained identity can be ingested again. Evidence
+files under the configured data directory may be unlinked only after no remaining
+database record references the path.
 
 Filings:
 

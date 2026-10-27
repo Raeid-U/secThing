@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   Retrieval,
   CorpusCatalog,
+  CompanyDataLifecycle,
   GroundedAnswer,
   chunkingProfileVersion,
   assessReadiness,
@@ -34,6 +35,7 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
   const sql = connectDatabase(config.databaseUrl);
   const retrieval = new Retrieval(sql, config, providers.embeddings);
   const corpus = new CorpusCatalog(sql, config, retrieval);
+  const companyData = new CompanyDataLifecycle(sql, config);
   const groundedAnswer = new GroundedAnswer(sql, config, providers.chat, retrieval);
   app.register(cors, { origin: true });
   app.addHook("onClose", async () => sql.end({ timeout: 5 }));
@@ -338,6 +340,28 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
     if (!id.success) return reply.code(400).send({ error: "Company id must be a positive integer." });
     if (!(await sql`SELECT id FROM companies WHERE id = ${id.data}`)[0]) return reply.code(404).send({ error: "Company not found." });
     return { ...(await corpus.status(id.data)), externalEmbeddingEstimate: config.aiMode === "external" ? await corpus.embeddingEstimate(id.data) : null };
+  });
+
+  app.delete("/api/v1/companies/:companyId/corpus", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ confirmation: z.literal("DELETE CORPUS") }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "Type DELETE CORPUS to confirm evidence deletion." });
+    const result = await companyData.deleteCorpus(id.data);
+    if (!result) return reply.code(404).send({ error: "Company not found." });
+    return { ...result, message: "The evidence corpus was deleted. The company remains in your library; use Add company to choose coverage and ingest it again." };
+  });
+
+  app.delete("/api/v1/companies/:companyId", async (request, reply) => {
+    const id = z.coerce.number().int().positive().safeParse((request.params as { companyId?: string }).companyId);
+    const body = z.object({ confirmation: z.string().min(1).max(500) }).safeParse(request.body);
+    if (!id.success || !body.success) return reply.code(400).send({ error: "The company name is required to confirm deletion." });
+    const company = await companyData.company(id.data);
+    if (!company) return reply.code(404).send({ error: "Company not found." });
+    if (body.data.confirmation !== company.legal_name)
+      return reply.code(409).send({ error: `Type ${company.legal_name} exactly to confirm company deletion.` });
+    const result = await companyData.deleteCompany(id.data);
+    if (!result) return reply.code(404).send({ error: "Company not found." });
+    return { ...result, message: "The company and its evidence were deleted." };
   });
 
   app.post("/api/v1/companies/:companyId/corpus/retry", async (request, reply) => {
