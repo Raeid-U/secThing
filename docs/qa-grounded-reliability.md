@@ -1,0 +1,149 @@
+# Guided QA pilot: grounded-answer reliability
+
+This is a human-assisted pilot, not a completed GPU acceptance report. The agent
+runs contract/database checks; the user runs the actual Compose/NVIDIA stack and
+reports observable results. Use one round at a time, diagnose discrepancies, then
+repeat only the affected checks. After the pilot, use the proven workflow to write
+an invocable QA skill; do not formalize untested steps as established practice.
+
+## Target and baseline
+
+- RTX 5070 Ti, 16 GB VRAM, 96 GB system RAM.
+- Compose Ollama endpoint: `http://ollama:11434`.
+- Chat: `qwen2.5:3b`; embeddings: `nomic-embed-text`, 768 dimensions.
+- Keep these models unchanged during the first comparison. Record Ollama version
+  with `docker compose exec ollama ollama --version`.
+- Start with an already-ready company and record its name, coverage years and
+  exclusion count. Do not delete or re-ingest its corpus to run this pilot.
+
+## Round 1: residency and UI responsiveness
+
+Add/confirm these values in `.env` (retain existing credentials and other values):
+
+```dotenv
+AI_MODEL_KEEP_ALIVE_SECONDS=120
+AI_QUEUE_WAIT_MS=60000
+AI_QUEUE_LIMIT=16
+AI_EMBEDDING_BATCH_SIZE=8
+OLLAMA_NUM_PARALLEL=1
+AI_CHAT_CONTEXT_WINDOW=8192
+AI_CHAT_MAX_OUTPUT_TOKENS=1024
+AI_REQUEST_TIMEOUT_MS=60000
+```
+
+From the repo root, rebuild the existing NVIDIA deployment:
+
+```bash
+docker compose -f compose.yaml -f compose.nvidia.yaml --profile ollama-nvidia up --build -d
+```
+
+Backend/worker apply migration `0010` on startup. Do not run older workers against
+the upgraded database. This migration adds runtime scheduling and worker fencing.
+
+1. Wait at least 130 seconds after all inference activity has stopped. Ingestion,
+   meaning search, and status-panel chat verification count as activity. Check:
+
+   ```bash
+   docker compose exec ollama ollama ps
+   ```
+
+   Models requested by this version should expire after the configured idle period;
+   Ollama may evict them earlier under pressure. A model loaded earlier by another
+   client may have a different expiry. Do not forcibly unload shared models.
+2. Ask a simple question supported by the selected company's filings, such as
+   “What does the company do?” Record the question, wall-clock time, answer status,
+   limitations, and whether its source opens correctly.
+3. Immediately ask the **same** question again. During both questions, sample
+   `docker compose exec ollama ollama ps` and `nvidia-smi` in another terminal.
+   Record loaded models, CPU/GPU placement, and VRAM use.
+4. While the answer is pending, scroll, use keyword search, and inspect a source
+   already open in another tab. Record freezes, errors, and whether clicks work.
+5. Check load timing in the audit using the read-only query below. Generation and
+   verification should use the same chat model with no background embedding call
+   between them. Warm verification should not repeatedly incur a large load time.
+   Some model switching between separate questions is expected when two models
+   cannot coexist. Residency is cooperative and does not reserve physical VRAM.
+
+Read only the newest five runs (substitute database/user if yours differ):
+
+```bash
+docker compose exec postgres psql -U secthing -d secthing -c "SELECT id, validation_status, latency_ms, raw_output->'timings' AS timings, (SELECT jsonb_agg(jsonb_build_object('purpose', c->>'purpose', 'loadMs', (c->>'loadDurationNs')::numeric / 1000000, 'promptTokens', c->'promptTokens', 'outputTokens', c->'outputTokens')) FROM jsonb_array_elements(raw_output->'calls') c) AS calls FROM model_runs ORDER BY id DESC LIMIT 5;"
+```
+
+Report this compact result before proceeding:
+
+```text
+Ollama version / company / coverage / exclusions:
+Exact question:
+Cold time / warm time:
+Status (answered or generation_limited) / limitations:
+Generation loadMs / verification loadMs (each run):
+Loaded models / CPU-GPU placement / peak VRAM:
+UI responsive during inference? Source opens?
+Errors or unexpected behavior:
+```
+
+Never paste `.env`, authorization headers, or credentials. Model-run outputs may
+contain the question and bounded filing evidence; share only relevant diagnostics.
+
+## Round 2: factual, temporal and contextual support
+
+Choose years for which the corpus actually has evidence. Repeat the same questions
+when investigating an anomaly so model/retrieval changes can be compared.
+
+| Check | Example | Expected observation |
+| --- | --- | --- |
+| Reporting period | “What was revenue in 2022 from 10-K filings?” | Facts end in the requested period; a 2023-filed report can describe 2022. |
+| Publication window | “What revenue was disclosed in 10-K filings filed in 2023?” | Publication dates match 2023; reporting periods may differ. |
+| Historical knowledge | “What was revenue in 2022 as of 2022-12-31?” | No fact published after the cutoff; refusal/excerpts are acceptable if evidence is unavailable. |
+| Comparison | “Compare revenue in 2022 and 2023.” | Both baselines, values, units and entity/segment scope are supported; missing support is disclosed. |
+| Context | Ask about a named segment or geography in the filings. | Whole-company values must not be attributed to that segment/geography. |
+| Unsupported premise | Ask for a precise figure absent from the retained filings. | No invented value; unsupported generated claims are withheld. |
+| Date validity | “What was revenue on 2022-02-30?” | An explicit invalid-date error, not a silently widened search. |
+
+The verifier reopens each cited retained passage and receives a bounded amount of
+adjacent text from that same retained section to check original context. This is
+not a second retrieval over unrelated sources.
+
+For every accepted claim, inspect the cited evidence for factual meaning, period,
+entity/segment, units and qualifiers. An existing source label and an exact quote
+alone do not prove entailment. Record any false acceptance **and** false rejection.
+A second pass using the same model can repeat its mistakes.
+
+Bare financial years select **period-end dates within calendar-year bounds**;
+explicit “filed” clauses select publication dates. Bare Q1–Q4 use calendar quarters;
+fiscal-quarter shorthand requires explicit reporting-period dates. Narrative
+retrieval uses the filing's report date for period filters; a document with unknown
+report date is omitted under such a filter. The verifier must still distinguish a
+source's report date from the period actually described in the passage.
+
+## Round 3: contention, expiry and recovery
+
+- Submit questions from two tabs, while a separate company's existing ingestion
+  performs embedding work. Record UI usability and audit queue wait. The active
+  call is not preempted; newer questions get priority at the next scheduling point,
+  same-model requests have affinity, and waits older than 15 seconds age into FIFO.
+- Queue capacity and wait are finite. A full/expired chat queue should return
+  HTTP 503 with `Retry-After: 5`; no unbounded request pile-up. Background contention
+  should defer work, rather than consume an attempt and exclude the document.
+- For an intentional short-wait test, temporarily set `AI_QUEUE_WAIT_MS=1000` and
+  `AI_QUEUE_LIMIT=1`, restart backend/worker, and submit overlapping requests.
+  Restore the original values afterward. Do this after the baseline, not during it.
+- Once inference and ingestion have stopped, repeat the idle-expiry observation.
+  Finite residency must not become an indefinite GPU pin.
+- Report failed requests, unfinished jobs, queue waits, and whether a subsequent
+  question succeeds. Do not stop/restart Ollama in the middle of shared work merely
+  to test error handling.
+
+## Acceptance and next iteration
+
+Pass only observed checks. “Not run” is different from “pass.” GPU acceptance is
+pending until the user reports results. Do not change models, enlarge context,
+or increase residency solely to hide a failure; first use load/queue/token data to
+identify its cause. Raw excerpts with a generation limitation are a safe fallback,
+but a high fallback rate is a quality failure to investigate.
+
+The initial target is a responsive evidence UI, bounded memory/request pressure,
+no repeated chat load between generation and verification, correct period/form/
+cutoff filtering, exact source reopening, and no accepted unsupported claims in the
+pilot set. This small set cannot establish universal grounding or hardware speed.

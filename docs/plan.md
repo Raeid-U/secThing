@@ -592,6 +592,21 @@ Definition of done:
 - Answers cite source filings.
 - Unsupported answers are refused or marked as unsupported.
 
+Current reliability work (`feature/grounded-answer-reliability`, 2026-11-03):
+
+- Implement bounded local-runtime scheduling, finite residency, and explicit
+  context/output limits before conversational response composition.
+- Verify generated claims for factual, temporal and contextual support using
+  deterministic checks and one independent cited-evidence review; withhold claims
+  when support cannot be established.
+- Account for complete generation/retry/verification messages and output reserves.
+- Extract lightweight question scope and distinguish reporting periods, publication
+  windows and as-of cutoffs before retrieval.
+- Pilot target-GPU acceptance through [guided human QA](qa-grounded-reliability.md).
+  Automated validation does not complete this acceptance step.
+- Resume conversational synthesis after reliability QA; reorganize the frontend
+  in its own later phase. Durable multi-turn context remains deferred.
+
 ### Phase 6: Dashboard and Timeline
 
 Deliverables:

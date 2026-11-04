@@ -33,7 +33,9 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
       AI_MODE: "local", AI_CHAT_PROVIDER: "ollama", AI_CHAT_BASE_URL: "http://fixture", AI_CHAT_MODEL: "fixture-chat",
       AI_EMBEDDING_PROVIDER: "ollama", AI_EMBEDDING_BASE_URL: "http://fixture", AI_EMBEDDING_MODEL: "fixture-embed", AI_EMBEDDING_DIMENSION: "2" }), {
       embeddings: { embed: async (request) => ({ model: request.model, embeddings: request.inputs.map(() => [1, 0]) }) },
-      chat: { chat: async (request) => ({ model: request.model, content: JSON.stringify({ findings: [{ statement: "Orchard revenue grew.", citations: ["C1"] }], interpretation: [], limitations: [] }) }) },
+      chat: { chat: async (request) => ({ model: request.model, content: JSON.stringify(request.messages[0].content.includes("independently assess")
+        ? { verdicts: [{ id: "finding-0", factual: true, temporal: true, contextual: true, quotes: [{ source: "C1", text: "Orchard revenue grew." }] }] }
+        : { findings: [{ statement: "Orchard revenue grew.", citations: ["C1"] }], interpretation: [], limitations: [] }) }) },
     });
   }, 30_000);
 
@@ -315,6 +317,29 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect((await corpus.embeddingEstimate(item.company_id))?.corpusFingerprint).not.toBe(estimate.corpusFingerprint);
   });
 
+  it("filters financial reporting periods, forms and as-of availability before applying the fact limit", async () => {
+    await source("Revenue was 100 USD in 2022."); await parseAndIndex();
+    await sql`UPDATE filings SET filing_date = '2023-02-01', report_date = '2022-12-31' WHERE id = ${item.filing_id}`;
+    const [factSource] = await sql`INSERT INTO companyfacts_sources (company_id, sec_url, body_path, content_hash)
+      VALUES (${item.company_id}, 'https://fixture/facts', '/fixture', 'temporal') RETURNING id`;
+    for (const [value, end, filed, form] of [[100, "2022-12-31", "2023-02-01", "10-K"], [120, "2022-12-31", "2024-02-01", "10-K"], [150, "2022-12-31", "2023-02-01", "10-Q"], ...Array.from({ length: 25 }, (_, i) => [900 + i, "2025-12-31", "2026-02-01", "10-K"])] as Array<[number, string, string, string]>) {
+      await sql`INSERT INTO financial_facts (company_id, source_id, metric, taxonomy, concept, unit, value, period_start, period_end, form_type, raw_fact)
+        VALUES (${item.company_id}, ${factSource.id}, 'revenue', 'us-gaap', 'Revenues', 'USD', ${value}, ${end.slice(0, 4) + "-01-01"}, ${end}, ${form}, ${sql.json({ filed })})`;
+    }
+    const retrieval = new Retrieval(sql, loadConfig({ DATABASE_URL: scopedUrl.toString(), DATA_DIR: dataDir }));
+    const pack = await retrieval.evidencePackage(item.company_id, "Revenue in 2022 from 10-K as of 2023-03-31", { maxInputTokens: 6000 });
+    expect(pack.analysis).toMatchObject({ periodAfter: "2022-01-01", periodBefore: "2022-12-31", filedBefore: "2023-03-31" });
+    expect(pack.sources.filter((s) => s.kind === "financial_fact").map((s) => s.locator.value)).toEqual(["100"]);
+    expect(pack.sources.some((s) => s.kind === "chunk")).toBe(true);
+    const comparison = await retrieval.evidencePackage(item.company_id, "Compare revenue between 2022 and 2025 in 10-K filings", { maxInputTokens: 1200 });
+    const periods = comparison.sources.filter((s) => s.kind === "financial_fact").map((s) => s.locator.periodEnd);
+    expect(periods).toContain("2022-12-31"); expect(periods).toContain("2025-12-31");
+    const unavailable = await retrieval.evidencePackage(item.company_id, "Revenue in 2022 as of 2022-12-31", { maxInputTokens: 6000 });
+    expect(unavailable.sources).toHaveLength(0);
+    const filed = await retrieval.evidencePackage(item.company_id, "Revenue filed in 2023 from 10-K", { maxInputTokens: 6000 });
+    expect(filed.sources.filter((s) => s.kind === "financial_fact").map((s) => s.locator.value)).toEqual(["100"]);
+  });
+
   it("blocks questions until corpus readiness, then audits a citation-safe grounded answer", async () => {
     await parseAndIndex();
     const init = post({ question: "What happened to orchard revenue?" });
@@ -331,7 +356,8 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
       headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });
     expect(answered.statusCode).toBe(200);
     expect(answered.json()).toMatchObject({ status: "answered", findings: [{ citations: ["C1"] }], citations: [{ label: "C1", locator: { normalizedDocumentId: expect.any(String) } }], modelRunId: expect.any(String) });
-    expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "valid", cited_source_ids: ["C1"] }]);
+    expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "support_checked", cited_source_ids: ["C1"] }]);
+    expect((await sql`SELECT raw_output FROM model_runs`)[0].raw_output.verificationEvidence[0].locator.verificationContext).toMatchObject({ clipped: true });
   });
 
   it("deletes a corpus transactionally while retaining a re-ingestable company identity", async () => {

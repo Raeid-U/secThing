@@ -28,9 +28,15 @@ const environmentSchema = z.object({
   AI_EMBEDDING_API_KEY: optionalNonEmptyString,
   AI_EMBEDDING_MODEL: optionalNonEmptyString,
   AI_EMBEDDING_DIMENSION: optionalPositiveInteger,
+  AI_MODEL_KEEP_ALIVE_SECONDS: z.coerce.number().int().min(0).max(3600).default(120),
+  AI_QUEUE_WAIT_MS: z.coerce.number().int().positive().max(300_000).default(60_000),
+  AI_QUEUE_LIMIT: z.coerce.number().int().positive().max(256).default(16),
+  AI_EMBEDDING_BATCH_SIZE: z.coerce.number().int().positive().max(64).default(8),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000),
   LOCAL_ONLY: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
 }).superRefine((environment, context) => {
+  if (environment.AI_CHAT_MAX_OUTPUT_TOKENS + 512 >= environment.AI_CHAT_CONTEXT_WINDOW)
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Chat context must leave more than 512 tokens beyond reserved output." });
   if (environment.AI_MODE === "disabled") return;
   if (!environment.AI_CHAT_BASE_URL && !environment.AI_EMBEDDING_BASE_URL) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "A chat or embedding provider endpoint is required when AI_MODE is enabled." });
@@ -56,6 +62,10 @@ export type PlatformConfig = {
   aiEmbeddingApiKey?: string;
   aiEmbeddingModel?: string;
   aiEmbeddingDimension?: number;
+  aiModelKeepAliveSeconds?: number;
+  aiQueueWaitMs?: number;
+  aiQueueLimit?: number;
+  aiEmbeddingBatchSize?: number;
   aiRequestTimeoutMs: number;
   localOnly: boolean;
 };
@@ -80,6 +90,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): PlatformCon
     aiEmbeddingApiKey: environment.AI_EMBEDDING_API_KEY,
     aiEmbeddingModel: environment.AI_EMBEDDING_MODEL,
     aiEmbeddingDimension: environment.AI_EMBEDDING_DIMENSION,
+    aiModelKeepAliveSeconds: environment.AI_MODEL_KEEP_ALIVE_SECONDS,
+    aiQueueWaitMs: environment.AI_QUEUE_WAIT_MS,
+    aiQueueLimit: environment.AI_QUEUE_LIMIT,
+    aiEmbeddingBatchSize: environment.AI_EMBEDDING_BATCH_SIZE,
     aiRequestTimeoutMs: environment.AI_REQUEST_TIMEOUT_MS,
     localOnly: environment.LOCAL_ONLY,
   };

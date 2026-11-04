@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 
 export type ClaimedWork = {
@@ -8,6 +9,7 @@ export type ClaimedWork = {
   filing_id: number | null;
   document_id: number | null;
   attempt_count: number;
+  lease_token: string;
   input: { ticker?: string; startDate?: string; profileKey?: string };
 };
 
@@ -39,12 +41,12 @@ export class WorkQueue {
 
   async claim(): Promise<ClaimedWork | undefined> {
     const rows = await this.sql<ClaimedWork[]>`
-      UPDATE work_items SET status = 'running', lease_owner = ${this.owner},
+      UPDATE work_items SET status = 'running', lease_owner = ${this.owner}, lease_token = ${randomUUID()},
         lease_expires_at = now() + ${this.leaseSeconds} * interval '1 second',
         attempt_count = attempt_count + 1, updated_at = now()
       WHERE id = (SELECT id FROM work_items WHERE status = 'pending' AND next_run_at <= now()
         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
-      RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, input
+      RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, lease_token, input
     `;
     return rows[0];
   }
@@ -52,7 +54,7 @@ export class WorkQueue {
   async assertOwnership(tx: TransactionSql, item: ClaimedWork): Promise<void> {
     const rows = await tx`SELECT id FROM work_items
       WHERE id = ${item.id} AND status = 'running' AND lease_owner = ${this.owner}
-        AND attempt_count = ${item.attempt_count} AND lease_expires_at > clock_timestamp()
+        AND attempt_count = ${item.attempt_count} AND lease_token = ${item.lease_token}::uuid AND lease_expires_at > clock_timestamp()
       FOR UPDATE`;
     if (!rows.length) throw new LeaseLostError();
   }
@@ -68,9 +70,19 @@ export class WorkQueue {
     const rows = await this.sql`UPDATE work_items
       SET lease_expires_at = clock_timestamp() + ${this.leaseSeconds} * interval '1 second', updated_at = now()
       WHERE id = ${item.id} AND status = 'running' AND lease_owner = ${this.owner}
-        AND attempt_count = ${item.attempt_count} AND lease_expires_at > clock_timestamp()
+        AND attempt_count = ${item.attempt_count} AND lease_token = ${item.lease_token}::uuid AND lease_expires_at > clock_timestamp()
       RETURNING id`;
     return rows.length > 0;
+  }
+
+  // Scheduling contention is backpressure, not a failed processing attempt.
+  async defer(item: ClaimedWork) {
+    return this.transaction(item, async (tx) => {
+      await tx`UPDATE work_items SET status = 'pending', attempt_count = GREATEST(0, attempt_count - 1),
+        lease_owner = null, lease_expires_at = null, next_run_at = now() + interval '5 seconds',
+        error_code = 'ai_busy', error_message = 'Waiting for the shared AI runtime.', updated_at = now()
+        WHERE id = ${item.id}`;
+    });
   }
 
   async recoverExpired() {
@@ -81,7 +93,7 @@ export class WorkQueue {
           error_code = 'lease_expired', error_message = 'Worker lease expired before completion.', updated_at = now()
         WHERE id IN (SELECT id FROM work_items WHERE status = 'running' AND lease_expires_at <= clock_timestamp()
           ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 100)
-        RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, input, status
+        RETURNING id, job_id, work_type, company_id, filing_id, document_id, attempt_count, lease_token, input, status
       `;
       for (const row of rows) {
         await tx`UPDATE jobs SET status = CASE WHEN EXISTS (

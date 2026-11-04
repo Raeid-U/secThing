@@ -51,6 +51,19 @@ describe.skipIf(!databaseUrl)("worker leases (PostgreSQL)", () => {
     expect(await owner.renew(item)).toBe(false);
   });
 
+  it("defers runtime contention without spending a retry and fences the previous token", async () => {
+    const old = (await first.claim())!;
+    await first.defer(old);
+    expect((await sql`SELECT attempt_count, status FROM work_items`)[0]).toMatchObject({ attempt_count: 0, status: "pending" });
+    await sql`UPDATE work_items SET next_run_at = now()`;
+    const current = (await first.claim())!;
+    expect(current.attempt_count).toBe(old.attempt_count);
+    expect(current.lease_token).not.toBe(old.lease_token);
+    expect(await first.renew(old)).toBe(false);
+    await expect(first.transaction(old, async () => undefined)).rejects.toBeInstanceOf(LeaseLostError);
+    expect(await first.renew(current)).toBe(true);
+  });
+
   it("recovers work that expires after startup and fences the previous attempt's writes", async () => {
     expect(await second.recoverExpired()).toHaveLength(0); // Startup before expiry.
     const old = (await first.claim())!;

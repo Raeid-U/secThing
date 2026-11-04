@@ -4,6 +4,7 @@ import {
   Retrieval,
   WorkQueue,
   LeaseLostError,
+  AiBusyError,
   excludeTerminalDocument,
   type ClaimedWork,
   backfillSearchIndex,
@@ -494,7 +495,7 @@ const idleLoop = setInterval(() => {
         }),
       );
       if (!(error instanceof LeaseLostError)) {
-        await failWork(item, error).catch((failure: unknown) => {
+        await (error instanceof AiBusyError ? queue.defer(item) : failWork(item, error)).catch((failure: unknown) => {
           if (!(failure instanceof LeaseLostError)) throw failure;
         });
       }

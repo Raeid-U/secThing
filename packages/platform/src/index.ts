@@ -13,3 +13,7 @@ export { CompanyDataLifecycle, type DeletionSummary } from "./company-data.js";
 export { FINANCIAL_CONCEPTS, normalizeCompanyFacts, persistCompanyFacts, type NormalizedFinancialFact } from "./financial-facts.js";
 export { GroundedAnswer, answerPromptVersion, answerSchemaVersion, validateStructuredAnswer, type SourcedStatement, type StructuredAnswer } from "./grounded-answer.js";
 export { WorkQueue, LeaseLostError, excludeTerminalDocument, type ClaimedWork } from "./work-queue.js";
+export { AiScheduler, AiBusyError } from "./ai-scheduler.js";
+export { QueryScopeError } from "./query-analysis.js";
+export { estimateTokens, estimateMessages, fitsContext } from "./ai-budget.js";
+export { validateVerification, verificationMessages, deterministicSupport } from "./answer-verification.js";

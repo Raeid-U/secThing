@@ -4,8 +4,8 @@ type FetchLike = typeof fetch;
 
 export type AiModel = { name: string; sizeBytes?: number; modifiedAt?: string };
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
-export type ChatRequest = { model: string; messages: ChatMessage[]; temperature?: number; responseFormat?: "json"; maxOutputTokens?: number };
-export type ChatResponse = { model: string; content: string; totalDurationNs?: number };
+export type ChatRequest = { model: string; messages: ChatMessage[]; temperature?: number; responseFormat?: "json"; maxOutputTokens?: number; contextWindow?: number };
+export type ChatResponse = { model: string; content: string; totalDurationNs?: number; loadDurationNs?: number; promptTokens?: number; outputTokens?: number };
 export type EmbeddingRequest = { model: string; inputs: string[] };
 export type EmbeddingResponse = { model: string; embeddings: number[][] };
 export type AiRuntimeStatus = {
@@ -37,7 +37,7 @@ function matchingModel(models: AiModel[], configured: string | undefined): boole
 }
 
 export class OllamaClient implements ChatProvider, EmbeddingProvider {
-  constructor(private readonly options: { baseUrl: string; apiKey?: string; timeoutMs: number; fetch?: FetchLike }) {}
+  constructor(private readonly options: { baseUrl: string; apiKey?: string; timeoutMs: number; keepAliveSeconds?: number; fetch?: FetchLike }) {}
 
   async listModels(): Promise<AiModel[]> {
     const body = await this.request("/api/tags", { method: "GET" });
@@ -54,17 +54,17 @@ export class OllamaClient implements ChatProvider, EmbeddingProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const body = await this.request("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ model: request.model, messages: request.messages, stream: false, format: request.responseFormat === "json" ? "json" : undefined, options: request.temperature === undefined ? undefined : { temperature: request.temperature } }),
+      body: JSON.stringify({ model: request.model, messages: request.messages, stream: false, format: request.responseFormat === "json" ? "json" : undefined, keep_alive: `${this.options.keepAliveSeconds ?? 120}s`, options: { temperature: request.temperature, num_ctx: request.contextWindow, num_predict: request.maxOutputTokens } }),
     });
     const response = body as Record<string, unknown>;
     const message = response.message;
     const content = message && typeof message === "object" ? (message as Record<string, unknown>).content : undefined;
     if (typeof content !== "string") throw new Error("Ollama returned a chat response without message content.");
-    return { model: typeof response.model === "string" ? response.model : request.model, content, totalDurationNs: typeof response.total_duration === "number" ? response.total_duration : undefined };
+    return { model: typeof response.model === "string" ? response.model : request.model, content, totalDurationNs: typeof response.total_duration === "number" ? response.total_duration : undefined, loadDurationNs: typeof response.load_duration === "number" ? response.load_duration : undefined, promptTokens: typeof response.prompt_eval_count === "number" ? response.prompt_eval_count : undefined, outputTokens: typeof response.eval_count === "number" ? response.eval_count : undefined };
   }
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
-    const body = await this.request("/api/embed", { method: "POST", body: JSON.stringify({ model: request.model, input: request.inputs }) });
+    const body = await this.request("/api/embed", { method: "POST", body: JSON.stringify({ model: request.model, input: request.inputs, keep_alive: `${this.options.keepAliveSeconds ?? 120}s`, truncate: false }) });
     const response = body as Record<string, unknown>;
     const embeddings = Array.isArray(response.embeddings)
       ? response.embeddings.filter((embedding): embedding is number[] => Array.isArray(embedding) && embedding.every((value) => typeof value === "number" && Number.isFinite(value)))
@@ -125,7 +125,7 @@ export class OpenAiCompatibleClient implements ChatProvider, EmbeddingProvider {
 
 function createOllamaClient(config: PlatformConfig): OllamaClient | undefined {
   return config.aiChatProvider === "ollama" && config.aiChatBaseUrl
-    ? new OllamaClient({ baseUrl: config.aiChatBaseUrl, apiKey: config.aiChatApiKey, timeoutMs: config.aiRequestTimeoutMs })
+    ? new OllamaClient({ baseUrl: config.aiChatBaseUrl, apiKey: config.aiChatApiKey, timeoutMs: config.aiRequestTimeoutMs, keepAliveSeconds: config.aiModelKeepAliveSeconds })
     : undefined;
 }
 
@@ -133,7 +133,7 @@ export async function inspectAiRuntime(config: PlatformConfig): Promise<AiRuntim
   if (config.aiMode === "disabled") return { mode: config.aiMode, status: "disabled", models: [], chat: { available: false }, embeddings: { available: false } };
   const chatClient = createOllamaClient(config);
   const embeddingClient = config.aiEmbeddingProvider === "ollama" && config.aiEmbeddingBaseUrl
-    ? new OllamaClient({ baseUrl: config.aiEmbeddingBaseUrl, apiKey: config.aiEmbeddingApiKey, timeoutMs: config.aiRequestTimeoutMs }) : undefined;
+    ? new OllamaClient({ baseUrl: config.aiEmbeddingBaseUrl, apiKey: config.aiEmbeddingApiKey, timeoutMs: config.aiRequestTimeoutMs, keepAliveSeconds: config.aiModelKeepAliveSeconds }) : undefined;
   const failures: string[] = [];
   let reachable = false;
   const inspect = async (client: OllamaClient | undefined) => {
@@ -154,5 +154,5 @@ export async function inspectAiRuntime(config: PlatformConfig): Promise<AiRuntim
 export async function verifyAiChat(config: PlatformConfig): Promise<ChatResponse> {
   const client = createOllamaClient(config);
   if (!client || !config.aiChatModel) throw new Error("A configured Ollama chat model is required for AI verification.");
-  return client.chat({ model: config.aiChatModel, messages: [{ role: "user", content: "Reply with exactly: ready" }], temperature: 0 });
+  return client.chat({ model: config.aiChatModel, messages: [{ role: "user", content: "Reply with exactly: ready" }], temperature: 0, contextWindow: config.aiChatContextWindow, maxOutputTokens: config.aiChatMaxOutputTokens });
 }

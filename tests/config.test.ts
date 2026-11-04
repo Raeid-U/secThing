@@ -50,3 +50,13 @@ describe("loadConfig", () => {
       AI_EMBEDDING_BASE_URL: "https://external.example" })).toThrow("Disable LOCAL_ONLY");
   });
 });
+
+describe("bounded AI controls", () => {
+  const base = { DATABASE_URL: "postgres://test:test@localhost/test" };
+  it("rejects indefinite residency, oversized batches, and unusable context/output budgets", () => {
+    expect(() => loadConfig({ ...base, AI_MODEL_KEEP_ALIVE_SECONDS: "-1" })).toThrow();
+    expect(() => loadConfig({ ...base, AI_EMBEDDING_BATCH_SIZE: "1000" })).toThrow();
+    expect(() => loadConfig({ ...base, AI_CHAT_CONTEXT_WINDOW: "1024", AI_CHAT_MAX_OUTPUT_TOKENS: "1024" })).toThrow("512 tokens");
+    expect(loadConfig({ ...base, AI_MODEL_KEEP_ALIVE_SECONDS: "0" }).aiModelKeepAliveSeconds).toBe(0);
+  });
+});

@@ -16,6 +16,17 @@ describe("OllamaClient", () => {
       expect(fetch.mock.calls[0][0].hostname).toBe("embedding-runtime");
     } finally { vi.unstubAllGlobals(); }
   });
+  it("sends finite residency, context and output limits, and disables silent embedding truncation", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const client = new OllamaClient({ baseUrl: "http://ollama:11434", timeoutMs: 1000, keepAliveSeconds: 45,
+      fetch: (async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return jsonResponse(requests.length === 1
+        ? { message: { content: "ok" }, load_duration: 123, prompt_eval_count: 10, eval_count: 2 }
+        : { embeddings: [[1, 2]] }); }) as typeof fetch });
+    await expect(client.chat({ model: "chat", messages: [], temperature: 0, contextWindow: 4096, maxOutputTokens: 512 })).resolves.toMatchObject({ loadDurationNs: 123, promptTokens: 10, outputTokens: 2 });
+    await client.embed({ model: "embed", inputs: ["text"] });
+    expect(requests[0]).toMatchObject({ keep_alive: "45s", options: { num_ctx: 4096, num_predict: 512, temperature: 0 } });
+    expect(requests[1]).toMatchObject({ keep_alive: "45s", truncate: false });
+  });
   it("normalizes model, chat, and embedding responses", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ models: [{ name: "qwen2.5:3b", size: 1_234, modified_at: "2026-09-16T00:00:00Z" }] }))

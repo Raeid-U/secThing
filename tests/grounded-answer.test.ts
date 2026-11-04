@@ -3,8 +3,8 @@ import { analyzeQuestion, OpenAiCompatibleClient, validateStructuredAnswer } fro
 
 describe("grounded research contracts", () => {
   it("detects dates, filing filters, metrics, and comparison intent deterministically", () => {
-    expect(analyzeQuestion("How did revenue change between the 2022 and 2025 10-K filings?")).toEqual({
-      formTypes: ["10-K"], filedAfter: "2022-01-01", filedBefore: "2025-12-31", metrics: ["revenue"], comparison: true, numeric: true,
+    expect(analyzeQuestion("How did revenue change between the 2022 and 2025 10-K filings?")).toMatchObject({
+      formTypes: ["10-K"], periodAfter: "2022-01-01", periodBefore: "2025-12-31", metrics: ["revenue"], comparison: true, numeric: true,
     });
     expect(analyzeQuestion("What did management call adjusted EBITDA?").metrics).toEqual([]);
   });

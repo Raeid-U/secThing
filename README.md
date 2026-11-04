@@ -99,3 +99,40 @@ Run `npm test`, `npm run check`, and `npm run build`. PostgreSQL lifecycle integ
 For browser interaction tests, run `npx playwright install --with-deps chromium`, then `npm run test:browser`. The suite starts the frontend and supplies fixture API responses; it needs neither SEC access nor Ollama. Set `CHROMIUM_PATH` to use an existing Chromium binary.
 
 For a real embedding-model smoke test, export `TEST_DATABASE_URL` for a disposable pgvector database, `AI_EMBEDDING_BASE_URL` for an Ollama endpoint reachable from the command's runtime, and `AI_EMBEDDING_MODEL` for an already pulled model. Then run `npm run validate:retrieval`. The script uses the real parser, index, Ollama adapter, and retrieval against four synthetic filings; it reports indexing/query latency and expected-source ranking for eight semantic/hybrid checks. It requires complete embedding coverage, no fallback, expected sources in the top three, and at least six expected sources ranked first. This small smoke set does not establish real-filing relevance. Temporary sources and its isolated database schema are removed on completion or failure; the script never falls back to the application's `DATABASE_URL`.
+
+## Grounded-answer reliability and local runtime use
+
+Local inference now shares a bounded PostgreSQL-backed queue across backend and
+worker processes using the same endpoint origin. One inference workflow runs per
+endpoint: generation and its independent claim-support pass hold one slot together.
+Interactive work is preferred, same-model waiting requests have affinity, and
+requests waiting over 15 seconds age into FIFO to prevent background starvation.
+Waiting requests do not hold database transactions or connections. Background
+embedding contention defers work without consuming a processing retry.
+
+`AI_MODEL_KEEP_ALIVE_SECONDS` defaults to 120 (0 releases after each request; maximum
+3600). This finite Ollama keep-alive is cooperative: it does not pin physical VRAM,
+prevent eviction under memory pressure, or control unrelated clients. Use the same
+base URL for chat/embeddings on the same runtime; endpoint aliases and separate
+Ollama servers sharing a GPU are not automatically detected. The bundled runtime
+uses `OLLAMA_NUM_PARALLEL=1` by default. Queue wait/size and embedding batch size are
+configurable in `.env.example`; overload returns a retryable 503 rather than
+unbounded parallel inference. Hardware still determines inference latency.
+
+Question analysis extracts dates, form types, metrics, topics and keywords without
+an extra model call. Financial years filter reporting-period end dates; explicit
+“filed” clauses filter publication dates, and “as of” excludes later publications.
+Complete serialized generation, retry and verification prompts include output and
+framing reserves in their conservative token estimates. Ollama receives explicit
+`num_ctx`/`num_predict`; exact tokenizer behavior still depends on the model.
+
+Generated claims undergo one independent, cited-evidence-only review for factual,
+temporal and contextual support, plus deterministic number/scope/quotation checks.
+Cited passages are independently reopened with bounded adjacent source context.
+Unverified claims are withheld; failed validation returns raw evidence with an
+explicit limitation. This is a support check, not proof of correctness, especially
+when the same model generates and verifies. Audits retain the bounded evidence,
+question/scope, verdicts, per-call load/token metrics and retrieval/queue timings.
+
+See [the guided QA pilot](docs/qa-grounded-reliability.md) for target-GPU checks and
+the report format. GPU/model acceptance remains pending human execution.

@@ -1327,6 +1327,22 @@ Rationale:
 - keeps GPU configuration outside application logic;
 - still provides a batteries-included path for common local use.
 
+### FRD-LOCALAI-002: Cooperative Scheduling and Finite Residency
+
+Local inference must use a bounded shared queue across application processes for
+one configured runtime origin. Interactive requests should take priority at
+scheduling boundaries, with same-model affinity and aging to prevent background
+starvation. Generation and its support verification must share a scheduling slot.
+Queue contention must not consume worker processing retries. Waiting work must not
+hold database connections or transactions. A full or expired question queue must
+return a retryable service-unavailable response.
+
+Ollama requests must carry finite configurable idle residency and explicit chat
+context/output limits. Residency is cooperative and cannot guarantee VRAM
+reservation, prevent eviction by the runtime, or control other applications.
+Hardware-specific performance must be measured rather than assumed. Keyword
+search and source inspection must remain usable while inference is active.
+
 ### FRD-LOCALAI-001: Ollama First-Class MVP Runtime
 
 Ollama should be the first local runtime documented and supported in MVP.
@@ -2618,6 +2634,21 @@ Implementation scope:
   validation result, latency, and timestamps;
 - one retry for malformed or citation-invalid structured output, followed by an
   evidence-only response with an explicit generation limitation.
+- lightweight question scope extraction without another inference call, including
+  form types, metrics/topics/keywords, reporting-period end dates, publication
+  dates and historical as-of cutoffs; apply constraints before candidate limits;
+- complete serialized generation, correction and verification message budgeting,
+  including question/metadata/framing and reserved output; fail safely if a prompt
+  cannot fit, and retain observed runtime token counts when available;
+- one separate support-review pass using only the original question, generated
+  claims and their cited evidence, checking factual, temporal and contextual
+  support; require exact supporting source quotes and deterministic number/scope
+  checks, withhold rejected claims, and never claim this proves correctness;
+- retain bounded source locators, review verdicts and model load/token/queue timing
+  in the model-run audit; display application-owned limitations instead of
+  unchecked generated factual prose in the limitations field;
+- target-runtime acceptance through a guided human QA pilot, recording observed
+  passes, failures and checks not run separately.
 
 Explicit non-scope:
 

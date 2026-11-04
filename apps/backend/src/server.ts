@@ -9,6 +9,9 @@ import {
   CorpusCatalog,
   CompanyDataLifecycle,
   GroundedAnswer,
+  AiScheduler,
+  AiBusyError,
+  QueryScopeError,
   chunkingProfileVersion,
   assessReadiness,
   backfillSearchIndex,
@@ -81,7 +84,7 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
         .code(409)
         .send({ error: "The configured chat model is unavailable.", status });
     try {
-      const response = await verifyAiChat(config);
+      const response = await new AiScheduler(sql, config).run(config.aiChatBaseUrl!, config.aiChatModel!, "interactive", () => verifyAiChat(config));
       return {
         status: "verified" as const,
         model: response.model,
@@ -89,6 +92,7 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
         totalDurationNs: response.totalDurationNs ?? null,
       };
     } catch (error) {
+      if (error instanceof AiBusyError) return reply.header("Retry-After", "5").code(503).send({ error: error.message });
       return reply
         .code(502)
         .send({
@@ -397,6 +401,8 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
     try {
       return { ...(await groundedAnswer.answer(id.data, body.data.question)), externalDisclosure: config.aiMode === "external" ? "The bounded evidence package for this question was sent to the configured external chat provider." : null };
     } catch (error) {
+      if (error instanceof AiBusyError) return reply.header("Retry-After", "5").code(503).send({ error: error.message });
+      if (error instanceof QueryScopeError) return reply.code(400).send({ error: error.message });
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Grounded answer generation failed." });
     }
   });
