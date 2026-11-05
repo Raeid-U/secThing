@@ -604,8 +604,11 @@ Current reliability work (`feature/grounded-answer-reliability`, 2026-11-03):
   windows and as-of cutoffs before retrieval.
 - Pilot target-GPU acceptance through [guided human QA](qa-grounded-reliability.md).
   Automated validation does not complete this acceptance step.
-- Resume conversational synthesis after reliability QA; reorganize the frontend
-  in its own later phase. Durable multi-turn context remains deferred.
+- User performance QA was reported on 2026-11-04; no noticeable ingestion slowdown
+  was observed. Conversational summaries and a separate Ask dialog now form the
+  next requested experience slice, with source-to-evidence navigation and preserved
+  current-answer state. Real-model summary acceptance remains open after fixing a
+  discarded-limitations schema gate. Durable multi-turn context remains deferred.
 
 ### Phase 6: Dashboard and Timeline
 

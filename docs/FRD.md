@@ -1721,7 +1721,9 @@ ingestion has completed, and any required external embedding estimate has been
 approved for the exact corpus generation and profile. It is
 `ready_with_exclusions` under the same conditions when one or more documents were
 auto-excluded. Search remains available throughout processing; generated answers
-must return a conflict response until either ready state is reached. Local Ollama
+must return a conflict response until either ready state is reached. Pending or
+running evidence work for the same company must also keep answers gated; recheck
+readiness when a queued question acquires the inference slot. Local Ollama
 embedding work requires no approval. Paid/external corpus embedding must first
 publish a document/token estimate and wait for explicit approval tied to that
 estimate, profile, and corpus generation.
@@ -2629,6 +2631,11 @@ Implementation scope:
 - chat UI/source panel.
 - a single current question/answer in client state, without durable conversation
   history;
+- a separate company-scoped Ask dialog with cited conversational summaries, source
+  links into the retained-generation evidence reader, and a return path that keeps
+  the current question/answer; no extra model call solely for presentation;
+- apply the same citation/support checks to summary paragraphs as to findings and
+  interpretation; clearly distinguish evidence-only fallback from generated prose;
 - model-run audit records containing provider/model, prompt/schema versions,
   evidence generations and cited IDs, token estimates, raw structured output,
   validation result, latency, and timestamps;

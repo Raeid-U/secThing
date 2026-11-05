@@ -111,6 +111,17 @@ describe.skipIf(!databaseUrl)("AI scheduling and support boundary (PostgreSQL)",
     expect(run.raw_output.calls[1]).toMatchObject({ purpose: "verification", loadDurationNs: 42 });
   });
 
+  it("returns a verified question-aware summary with the same two inference calls", async () => {
+    const summaryDraft = { summary: [{ statement: "For 2022, revenue was 100 USD.", citations: ["F1"] }], findings: [], interpretation: [], limitations: "Legacy model prose is ignored." };
+    const summaryVerdict = { verdicts: [{ ...approved.verdicts[0], id: "summary-0" }] };
+    const chat = vi.fn(async () => ({ model: "chat", content: JSON.stringify(chat.mock.calls.length === 1 ? summaryDraft : summaryVerdict) }));
+    const result = await new GroundedAnswer(sql, config, { chat }, retrieval).answer(await company(), evidence.question);
+    expect(result.status).toBe("answered");
+    expect(result).toMatchObject({ summary: summaryDraft.summary, findings: [] });
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect((await sql`SELECT prompt_version FROM model_runs`)[0].prompt_version).toBe("grounded-answer-v3");
+  });
+
   it("withholds all claims on verifier failure and uses evidence-only fallback", async () => {
     let count = 0;
     const provider = { chat: async () => ({ model: "chat", content: JSON.stringify(++count === 1 ? draft : { verdicts: [] }) }) };
@@ -134,6 +145,21 @@ describe.skipIf(!databaseUrl)("AI scheduling and support boundary (PostgreSQL)",
     const result = await new GroundedAnswer(sql, config, { chat: overBudget }, retrieval).answer(await company(), evidence.question);
     expect(result.status).toBe("generation_limited"); expect(overBudget).toHaveBeenCalledTimes(1);
     expect(result.limitations[0]).toContain("token usage");
+  });
+
+  it("checks company readiness again when a queued question gets the runtime slot", async () => {
+    let release!: () => void;
+    const active = first.run(runtime, "chat", "interactive", () => new Promise<void>((resolve) => { release = resolve; }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const chat = vi.fn();
+    const assertReady = vi.fn(async () => { throw new Error("Evidence rebuild started while queued."); });
+    const result = new GroundedAnswer(sql, config, { chat }, retrieval).answer(await company(), evidence.question, assertReady).catch((error) => error);
+    await vi.waitFor(async () => expect((await sql`SELECT * FROM ai_runtime_queue`).length).toBe(1));
+    expect(assertReady).not.toHaveBeenCalled();
+    release(); await active;
+    expect((await result).message).toContain("Evidence rebuild");
+    expect(chat).not.toHaveBeenCalled();
+    await first.run(runtime, "chat", "interactive", async () => undefined);
   });
 
   it("avoids any inference when the complete question leaves no evidence budget", async () => {

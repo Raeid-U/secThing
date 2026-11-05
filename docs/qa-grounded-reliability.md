@@ -6,6 +6,30 @@ reports observable results. Use one round at a time, diagnose discrepancies, the
 repeat only the affected checks. After the pilot, use the proven workflow to write
 an invocable QA skill; do not formalize untested steps as established practice.
 
+## User-observed pilot results — 2026-11-04
+
+The user reported approximately 45 seconds to cold-load the model, followed by
+3–7 seconds for the answer, and 2–10 seconds for subsequent warm questions. Running
+ingestion concurrently did not cause a noticeably significant slowdown. These are
+self-reported timings, not audited per-call measurements or a universal hardware
+performance claim. Narrow questions were reported to return quickly with guidance
+to broaden the question.
+
+Generated-summary acceptance remains open. The question “What recent disclosures
+did this company file?” returned an evidence-only fallback. Expanding its
+limitations revealed `limitations must be a string array.` This was an unnecessary
+schema gate on discarded model metadata, not a failed factual-support verdict.
+The application no longer requests or validates that unused field; citations and
+support checks remain required. A separate numeric-guard bug that interpreted the
+“10” in “10-K” as a financial value was fixed with regression coverage.
+
+After restarting the backend, repeat that same question. Report whether the result
+is a cited summary or evidence-only output, along with the expanded diagnostic if
+it still falls back. Then inspect a citation and use “Return to answer” to confirm
+that question/answer state is preserved. Test Escape/focus restoration and mobile
+layout. Browser automation is still unexecuted here because the browser download
+was denied with HTTP 403; browser test discovery is not an execution pass.
+
 ## Target and baseline
 
 - RTX 5070 Ti, 16 GB VRAM, 96 GB system RAM.

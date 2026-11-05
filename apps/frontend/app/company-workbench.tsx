@@ -62,6 +62,7 @@ export function CompanyWorkbench() {
   const [stateFilter, setStateFilter] = useState("");
   const [notice, setNotice] = useState("");
   const [indexing, setIndexing] = useState(false);
+  const [researchRevision, setResearchRevision] = useState(0);
   const resultsPane = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (
@@ -139,6 +140,7 @@ export function CompanyWorkbench() {
     navigate({ filing: String(locator.filingId), document: String(locator.documentId), generation: String(locator.normalizedDocumentId),
       hash: locator.textHash ?? "", start: String(locator.startOffset ?? ""), end: String(locator.endOffset ?? "") });
     setLibrary(false);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(".document-workspace")?.focus());
   }
   function nextHit(direction: number) {
     const index = hits.findIndex((hit) => hit === selectedHit);
@@ -187,6 +189,7 @@ export function CompanyWorkbench() {
     setNotice(message);
     setQuery("");
     setStateFilter("");
+    setResearchRevision((value) => value + 1);
     if (scope === "company") {
       navigate({ ...emptyLocation });
       setLibrary(true);
@@ -269,6 +272,8 @@ export function CompanyWorkbench() {
                     Processing {processing} job{processing === 1 ? "" : "s"}
                   </span>
                 )}
+                <AskFilings key={`${location.company}:${researchRevision}`} companyId={location.company}
+                  companyName={detail?.company.legal_name ?? "Selected company"} onOpenCitation={openCitation} />
                 <button onClick={() => void reindex()} disabled={indexing}>
                   {indexing ? "Updating…" : "Update evidence"}
                 </button>
@@ -429,7 +434,6 @@ export function CompanyWorkbench() {
                 </button>
               </div>
             )}
-            <AskFilings companyId={location.company} onOpenCitation={openCitation} />
             <div className="evidence-layout">
               <section
                 className="results-panel"

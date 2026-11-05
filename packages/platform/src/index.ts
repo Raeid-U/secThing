@@ -8,7 +8,7 @@ export { FilingParser, detectFilingSections, filingParserVersion, normalizeFilin
 export { ChunkingAndIndexing, chunkingProfileVersion, type ChunkingSection, type IndexedChunk } from "./chunking.js";
 export { backfillSearchIndex, chunkDocument, parseFilingSource } from "./evidence-pipeline.js";
 export { Retrieval, analyzeQuestion, embeddingSettings, type EvidencePackage, type EvidenceSource, type QueryAnalysis, type SearchHit, type SearchMode, type SearchFilters } from "./retrieval.js";
-export { CorpusCatalog } from "./corpus.js";
+export { CorpusCatalog, CorpusNotReadyError } from "./corpus.js";
 export { CompanyDataLifecycle, type DeletionSummary } from "./company-data.js";
 export { FINANCIAL_CONCEPTS, normalizeCompanyFacts, persistCompanyFacts, type NormalizedFinancialFact } from "./financial-facts.js";
 export { GroundedAnswer, answerPromptVersion, answerSchemaVersion, validateStructuredAnswer, type SourcedStatement, type StructuredAnswer } from "./grounded-answer.js";

@@ -7,7 +7,8 @@ shell. The implemented journey is:
 
 1. choose or add a company;
 2. search its preserved filing evidence;
-3. inspect a result against the original source.
+3. inspect a result against the original source;
+4. open Ask the filings for a cited explanation, then return to the evidence bank.
 
 Exact-word search remains useful without an AI runtime. Meaning-based modes are
 shown only when the backend reports that they are configured.
@@ -31,6 +32,16 @@ shown only when the backend reports that they are configured.
   available for rapid switching; on narrower screens it becomes an overlay.
 - A selected company shows identity and evidence coverage, one integrated
   search/filter band, then filings or ranked passages.
+- Ask the filings opens a native dialog from the selected company's header. The
+  evidence bank retains the full page height when the dialog is closed. The dialog
+  has a company heading, a scrolling answer area, and an always-available composer;
+  it keeps the existing palette, Public Sans for conversation, and Source Serif
+  only for original evidence. Answers use a readable line length rather than chat
+  bubbles or a second dashboard.
+- Verified summaries appear as cited prose; supporting findings and coverage details
+  are expandable. Evidence-only fallbacks are named explicitly and never labeled as
+  an AI summary. Inline citation buttons open the exact retained passage in the
+  evidence reader. Financial facts can be inspected in place with their provenance.
 - Opening evidence collapses the library. Desktop compares preserved original
   and extracted text; phones show one explicit Original/Extracted view at a
   time. Search controls and document controls must never require horizontal
@@ -59,3 +70,17 @@ polling, search revisions, and the current company/reader snapshots. Components
 own only local presentation state such as rail visibility, intake progress,
 reader view, font size, and pane ratio. The frontend consumes explicit backend
 status fields and does not infer successful processing from missing data.
+
+## Ask state and return path
+
+The current question/answer is retained while the dialog is closed, including when
+following a source. Its launcher then says “Return to answer.” Escape and “Back to
+evidence” restore launcher focus; a source link focuses the evidence reader.
+Company changes and corpus deletion reset the answer and abort obsolete requests.
+Closing a pending question keeps it running so users can continue inspecting
+evidence. Each question still runs independently; this is not persistent chat
+history or follow-up memory.
+
+Corpus status polling runs while Ask is open or working. A pending/running evidence
+rebuild for the selected company keeps its composer gated, even if old chunks are
+still searchable. Search and source inspection remain available.

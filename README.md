@@ -16,7 +16,7 @@ The backend is available on `http://localhost:8080`:
 - `GET /ready` checks PostgreSQL, current migrations, and the writable data directory.
 - `GET /api/v1/system/capabilities` exposes explicit capability flags.
 
-The records workspace provides guided company intake, filterable filings, company-scoped keyword/meaning/combined search, and a fixed frame with independently scrolling original-source and extracted-text panes. Selecting a result opens its exact extracted passage. The corpus includes primary HTML/text/PDF filings and human-readable exhibits, while technical assets are disclosed as exclusions. PDF citations retain page provenance. Structured financial facts and the company-scoped **Ask the filings** surface return citation-validated answers only after the corpus is operationally complete.
+The records workspace provides guided company intake, filterable filings, company-scoped keyword/meaning/combined search, and a fixed frame with independently scrolling original-source and extracted-text panes. Selecting a result opens its exact extracted passage. The corpus includes primary HTML/text/PDF filings and human-readable exhibits, while technical assets are disclosed as exclusions. PDF citations retain page provenance. Structured financial facts and the company-scoped **Ask the filings** dialog return citation-validated answers only after the corpus is operationally complete.
 
 The worker backfills missing or outdated chunk indexes when it starts. Use **Update index** in the workspace or `POST /api/v1/companies/:companyId/search/reindex` to queue missing indexes and retry failed embedding jobs. The response contains `queued`, `jobIds`, and optionally `embeddingsQueued`; already indexed or actively processing documents are skipped. Search is available at `GET /api/v1/companies/:companyId/search?q=...`, with optional `mode=full_text|semantic|hybrid`, `formType`, `sectionType`, `filedAfter`, `filedBefore`, and `limit`.
 
@@ -136,3 +136,11 @@ question/scope, verdicts, per-call load/token metrics and retrieval/queue timing
 
 See [the guided QA pilot](docs/qa-grounded-reliability.md) for target-GPU checks and
 the report format. GPU/model acceptance remains pending human execution.
+
+Ask opens separately from the company header. Cited summary paragraphs are checked
+by the same support review as the detailed findings. Selecting a citation returns
+to its exact evidence passage; **Return to answer** keeps the current question and
+answer available while inspecting sources. Rebuilding the selected company blocks
+new answers while keyword search remains available. Model-written limitations are
+discarded; malformed unused metadata cannot prevent otherwise valid claims from
+reaching support verification.

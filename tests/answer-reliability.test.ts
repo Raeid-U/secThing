@@ -50,6 +50,9 @@ describe("claim support verification", () => {
   });
   it("rejects invented numbers and sources outside the temporal scope even if the model approves", () => {
     expect(deterministicSupport({ statement: "Revenue was 200 USD in 2022.", citations: ["F1"] }, evidence.sources, evidence)).toBe(false);
+    const filing = [{ ...evidence.sources[0], kind: "chunk" as const, text: "The company described its operations.", locator: { formType: "10-K", reportDate: "2022-12-31", filingDate: "2023-02-01" } }];
+    expect(deterministicSupport({ statement: "The company described its operations in a 10-K filing.", citations: ["F1"] }, filing, evidence)).toBe(true);
+    expect(deterministicSupport({ statement: "Revenue was 10 USD.", citations: ["F1"] }, filing, evidence)).toBe(false);
     const negative = [{ ...evidence.sources[0], text: "Revenue was -100 USD in 2022." }];
     expect(deterministicSupport(answer.findings[0], negative, evidence)).toBe(false);
     expect(deterministicSupport({ statement: "Revenue was 100 million USD in 2022.", citations: ["F1"] }, [{ ...evidence.sources[0], text: "Revenue was 100,000,000 USD in 2022." }], evidence)).toBe(true);
@@ -74,5 +77,17 @@ describe("bounded temporal clauses", () => {
     expect(analyzeQuestion("Revenue after 2022 and before 2025")).toMatchObject({ periodAfter: "2023-01-01", periodBefore: "2024-12-31" });
     expect(analyzeQuestion("Revenue since 2022 through 2025")).toMatchObject({ periodAfter: "2022-01-01", periodBefore: "2025-12-31" });
     expect(analyzeQuestion("Revenue after 2022 and explain the sources").periodBefore).toBeUndefined();
+  });
+});
+
+describe("conversational summary support", () => {
+  it("checks summary paragraphs as independent cited claims", () => {
+    const conversational = { ...answer, summary: [{ statement: "For 2022, revenue was 100 USD.", citations: ["F1"] }] };
+    const summaryVerdict = { ...verdict, id: "summary-0" };
+    expect(validateVerification({ verdicts: [summaryVerdict, verdict] }, conversational, evidence).summary).toHaveLength(1);
+    const rejected = validateVerification({ verdicts: [{ ...summaryVerdict, contextual: false }, verdict] }, conversational, evidence);
+    expect(rejected.summary).toEqual([]);
+    expect(rejected.findings).toHaveLength(1);
+    expect(() => validateVerification({ verdicts: [verdict] }, conversational, evidence)).toThrow("every claim");
   });
 });

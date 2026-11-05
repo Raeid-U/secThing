@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   Retrieval,
   CorpusCatalog,
+  CorpusNotReadyError,
   CompanyDataLifecycle,
   GroundedAnswer,
   AiScheduler,
@@ -399,9 +400,10 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
     if (!config.aiChatProvider || !config.aiChatBaseUrl || !config.aiChatModel)
       return reply.code(503).send({ error: "A chat provider and model must be configured for grounded questions." });
     try {
-      return { ...(await groundedAnswer.answer(id.data, body.data.question)), externalDisclosure: config.aiMode === "external" ? "The bounded evidence package for this question was sent to the configured external chat provider." : null };
+      return { ...(await groundedAnswer.answer(id.data, body.data.question, () => corpus.assertReady(id.data))), externalDisclosure: config.aiMode === "external" ? "The bounded evidence package for this question was sent to the configured external chat provider." : null };
     } catch (error) {
       if (error instanceof AiBusyError) return reply.header("Retry-After", "5").code(503).send({ error: error.message });
+      if (error instanceof CorpusNotReadyError) return reply.code(409).send({ error: error.message, corpus: error.corpus });
       if (error instanceof QueryScopeError) return reply.code(400).send({ error: error.message });
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Grounded answer generation failed." });
     }

@@ -358,6 +358,12 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(answered.json()).toMatchObject({ status: "answered", findings: [{ citations: ["C1"] }], citations: [{ label: "C1", locator: { normalizedDocumentId: expect.any(String) } }], modelRunId: expect.any(String) });
     expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "support_checked", cited_source_ids: ["C1"] }]);
     expect((await sql`SELECT raw_output FROM model_runs`)[0].raw_output.verificationEvidence[0].locator.verificationContext).toMatchObject({ clipped: true });
+    await sql`INSERT INTO work_items (job_id, company_id, work_type) VALUES (${item.job_id}, ${item.company_id}, 'fetch_metadata')`;
+    const rebuilding = await questionApp.inject({ method: "POST", url: `/api/v1/companies/${item.company_id}/questions`,
+      headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });
+    expect(rebuilding.statusCode).toBe(409);
+    expect(rebuilding.json()).toMatchObject({ corpus: { readiness: "processing", activeWorkCount: 1 } });
+    expect(await sql`SELECT id FROM model_runs`).toHaveLength(1);
   });
 
   it("deletes a corpus transactionally while retaining a re-ingestable company identity", async () => {

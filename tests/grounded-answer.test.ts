@@ -13,7 +13,17 @@ describe("grounded research contracts", () => {
     const allowed = new Set(["C1"]);
     expect(() => validateStructuredAnswer({ findings: [{ statement: "Claim", citations: [] }], interpretation: [], limitations: [] }, allowed)).toThrow("at least one citation");
     expect(() => validateStructuredAnswer({ findings: [{ statement: "Claim", citations: ["C9"] }], interpretation: [], limitations: [] }, allowed)).toThrow("unknown citation");
+    expect(() => validateStructuredAnswer({ summary: [{ statement: "Summary", citations: ["C9"] }], findings: [], interpretation: [], limitations: [] }, allowed)).toThrow("unknown citation");
     expect(validateStructuredAnswer({ findings: [{ statement: "Claim", citations: ["C1"] }], interpretation: [], limitations: ["Limited period"] }, allowed).findings).toHaveLength(1);
+  });
+
+  it("ignores unused provider limitations without weakening claim citation validation", () => {
+    for (const limitations of [undefined, null, "This was returned as prose.", { unsupported: "generated content" }]) {
+      const parsed = validateStructuredAnswer({ summary: [{ statement: "Supported summary", citations: ["C1"] }], findings: [], interpretation: [], limitations }, new Set(["C1"]));
+      expect(parsed.summary).toHaveLength(1);
+      expect(parsed.limitations).toEqual([]);
+    }
+    expect(() => validateStructuredAnswer({ summary: [{ statement: "Uncited summary", citations: [] }], findings: [], interpretation: [], limitations: "prose" }, new Set(["C1"]))).toThrow("at least one citation");
   });
 
   it("normalizes OpenAI-compatible chat and embedding payloads", async () => {

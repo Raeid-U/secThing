@@ -138,7 +138,7 @@ export function DocumentReader({
   }
 
   return (
-    <section className="document-workspace" aria-label="Document inspection">
+    <section className="document-workspace" aria-label="Document inspection" tabIndex={-1}>
       <header className="document-toolbar">
         <div>
           <span className="form-tag">

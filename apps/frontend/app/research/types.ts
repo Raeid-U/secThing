@@ -115,6 +115,7 @@ export const emptyLocation: Location = {
 };
 
 export type CorpusStatus = {
+  activeWorkCount?: number;
   readiness: "processing" | "ready" | "ready_with_exclusions";
   stageCounts: Record<string, number>;
   structuredFactsComplete: boolean;
@@ -131,6 +132,7 @@ export type AnswerCitation = {
   locator: { filingId?: string; documentId?: string; normalizedDocumentId?: string; textHash?: string; startOffset?: number; endOffset?: number; pageStart?: number; pageEnd?: number; accessionNumber?: string; formType?: string };
 };
 export type GroundedAnswerResponse = {
+  summary?: Array<{ statement: string; citations: string[] }>;
   status: "answered" | "insufficient_evidence" | "generation_limited";
   findings: Array<{ statement: string; citations: string[] }>;
   interpretation: Array<{ statement: string; citations: string[] }>;

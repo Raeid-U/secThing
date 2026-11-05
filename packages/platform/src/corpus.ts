@@ -9,7 +9,7 @@ export class CorpusCatalog {
   constructor(private sql: Sql, private config: PlatformConfig, private retrieval = new Retrieval(sql, config)) {}
 
   async status(companyId: number) {
-    const [documents, coverage, facts, embeddings] = await Promise.all([
+    const [documents, coverage, facts, embeddings, activeWork] = await Promise.all([
       this.sql<{ stage: string; count: number }[]>`
         SELECT stage, count(*)::integer AS count FROM filing_documents d
         JOIN filings f ON f.id = d.filing_id WHERE f.company_id = ${companyId} GROUP BY stage ORDER BY stage`,
@@ -21,6 +21,9 @@ export class CorpusCatalog {
         FROM filings WHERE company_id = ${companyId}`,
       this.sql<{ complete: boolean }[]>`SELECT EXISTS (SELECT 1 FROM companyfacts_sources WHERE company_id = ${companyId} AND status = 'complete') AS complete`,
       this.retrieval.status(companyId),
+      this.sql<{ count: number }[]>`SELECT count(*)::integer AS count FROM work_items
+        WHERE company_id = ${companyId} AND status IN ('pending', 'running')
+          AND work_type IN ('fetch_metadata', 'fetch_companyfacts', 'acquire_filing_source', 'parse_filing_source', 'chunk_document', 'embed_document')`,
     ]);
     const excluded = await this.sql`
       SELECT d.id, d.filing_id, d.document_name, d.document_type, d.exclusion_reason, d.attempt_count, d.retryable,
@@ -34,14 +37,20 @@ export class CorpusCatalog {
     const terminalDocuments = (stageCounts.embedded ?? 0) + (stageCounts.excluded ?? 0);
     const documentTotal = documents.reduce((sum, row) => sum + row.count, 0);
     const embeddingComplete = !embeddings.configured || embeddings.chunks === embeddings.embedded;
-    const operational = coverage[0].supported > 0 && coverage[0].missing_manifests === 0 &&
+    const operational = activeWork[0].count === 0 && coverage[0].supported > 0 && coverage[0].missing_manifests === 0 &&
       documentTotal > 0 && terminalDocuments === documentTotal && facts[0].complete && embeddingComplete;
     return {
       readiness: operational ? (excluded.length ? "ready_with_exclusions" : "ready") : "processing",
-      stageCounts, activeVersions: { parser: filingParserVersion, chunking: chunkingProfileVersion, embeddingProfile: embeddingSettings(this.config)?.key ?? null },
+      activeWorkCount: activeWork[0].count, stageCounts, activeVersions: { parser: filingParserVersion, chunking: chunkingProfileVersion, embeddingProfile: embeddingSettings(this.config)?.key ?? null },
       coverage: { earliestFilingDate: coverage[0].earliest, latestFilingDate: coverage[0].latest, supportedFilings: coverage[0].supported, missingManifests: coverage[0].missing_manifests },
       structuredFactsComplete: facts[0].complete, embeddings, exclusions: excluded, failures,
     };
+  }
+
+  async assertReady(companyId: number) {
+    const status = await this.status(companyId);
+    if (status.readiness !== "ready" && status.readiness !== "ready_with_exclusions") throw new CorpusNotReadyError(status);
+    return status;
   }
 
   async embeddingEstimate(companyId: number) {
@@ -78,4 +87,8 @@ export class CorpusCatalog {
     }
     return { queued: documents.length, jobId: jobs[0].id };
   }
+}
+
+export class CorpusNotReadyError extends Error {
+  constructor(readonly corpus: Awaited<ReturnType<CorpusCatalog["status"]>>) { super("This company's evidence is being updated. Please wait for processing to finish before asking again."); }
 }

@@ -88,7 +88,7 @@ async function fixture(page: Page) {
       exclusions: [], failures: [], coverage: { earliestFilingDate: "2023-01-01", latestFilingDate: "2026-01-01", supportedFilings: 50, missingManifests: 0 }, externalEmbeddingEstimate: null,
     };
     else if (url.pathname.endsWith("/questions")) body = {
-      status: "answered", findings: [{ statement: "Northstar provides cloud software to regulated industries.", citations: ["C1"] }],
+      status: "answered", summary: [{ statement: "Northstar serves regulated industries with cloud software.", citations: ["C1"] }], findings: [{ statement: "Northstar provides cloud software to regulated industries.", citations: ["C1"] }],
       interpretation: [{ statement: "The filing presents regulated industries as a core market.", citations: ["C1"] }], limitations: [],
       citations: [{ label: "C1", kind: "chunk", text: hit.chunk_text, locator: { filingId: "1", documentId: "1", normalizedDocumentId: "1", textHash: "fixture-hash", startOffset: 18, endOffset: 74, formType: "10-K", accessionNumber: filings[0].accession_number } }],
       coverage: {}, modelRunId: "1", externalDisclosure: null,
@@ -234,16 +234,102 @@ test("fixed frame, source comparison, passage navigation and retained search", a
   ).toBeVisible();
 });
 
-test("asks a grounded question and opens its exact cited generation", async ({ page }) => {
+test("opens a separate answer dialog, inspects its exact source, and returns without losing the answer", async ({ page }) => {
   await page.goto("/records?company=1");
-  await expect(page.getByText("Answers use only this company’s indexed SEC evidence.")).toBeVisible();
-  await page.getByLabel("Question").fill("What market does Northstar serve?");
-  await page.getByRole("button", { name: "Ask", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "What the filings show" })).toBeVisible();
-  await expect(page.getByText("Northstar provides cloud software to regulated industries.")).toBeVisible();
-  await page.getByRole("button", { name: new RegExp(`C1.*10-K`) }).click();
+  await expect(page.getByLabel("Question", { exact: true })).not.toBeVisible();
+  await page.getByLabel("Form filter").selectOption("10-K");
+  await page.getByRole("button", { name: "Ask the filings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ask the filings", exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Question", { exact: true }).fill("What market does Northstar serve?");
+  await dialog.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "AI summary" })).toBeVisible();
+  await expect(dialog.getByText("Northstar serves regulated industries with cloud software.")).toBeVisible();
+  await expectAccessible(page);
+  await page.screenshot({ path: "test-results/ask-filings-desktop.png" });
+  await dialog.getByRole("button", { name: "Open source C1", exact: true }).first().click();
+  await expect(dialog).not.toBeVisible();
   await expect(page).toHaveURL(/generation=1/);
   await expect(page.getByText("Extracted evidence", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Form filter")).toHaveValue("10-K");
+  await expect(page.getByRole("region", { name: "Document inspection" })).toBeFocused();
+  await page.getByRole("button", { name: "Return to answer", exact: true }).click();
+  await expect(dialog.getByLabel("Question", { exact: true })).toHaveValue("What market does Northstar serve?");
+  await expect(dialog.getByText("Northstar serves regulated industries with cloud software.")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Return to answer", exact: true })).toBeFocused();
+});
+
+test("finishes a pending question while closed without submitting it twice", async ({ page }) => {
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  let requests = 0;
+  await page.route("**/companies/1/questions", async (route) => {
+    requests += 1;
+    await pending;
+    await route.fulfill({ json: { status: "answered", summary: [{ statement: "The company serves regulated industries.", citations: ["C1"] }], findings: [], interpretation: [], limitations: [], citations: [], coverage: {}, modelRunId: "3" } });
+  });
+  await page.goto("/records?company=1");
+  await page.getByRole("button", { name: "Ask the filings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ask the filings", exact: true });
+  await dialog.getByLabel("Question", { exact: true }).fill("Who does the company serve?");
+  await dialog.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("Reviewing the evidence");
+  await dialog.getByRole("button", { name: "Back to evidence", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Question in progress", exact: true })).toBeVisible();
+  finish();
+  await page.getByRole("button", { name: "Return to answer", exact: true }).click();
+  await expect(dialog.getByText("The company serves regulated industries.", { exact: true })).toBeVisible();
+  expect(requests).toBe(1);
+});
+
+test("makes evidence-only fallback explicit rather than labeling excerpts as an AI summary", async ({ page }) => {
+  await page.route("**/companies/1/questions", (route) => route.fulfill({ json: {
+    status: "generation_limited", findings: [{ statement: "Original excerpt from the filing.", citations: ["C1"] }], interpretation: [],
+    limitations: ["Generated claims were withheld: verification must assess every claim exactly once."], citations: [{ label: "C1", kind: "chunk", text: "Original excerpt from the filing.", locator: { filingId: "1", documentId: "1", normalizedDocumentId: "1", formType: "10-K" } }], coverage: {}, modelRunId: "2",
+  } }));
+  await page.goto("/records?company=1");
+  await page.getByRole("button", { name: "Ask the filings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ask the filings", exact: true });
+  await dialog.getByLabel("Question", { exact: true }).fill("What changed?");
+  await dialog.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Evidence only", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "AI summary", exact: true })).toHaveCount(0);
+  await dialog.getByText("Why no AI summary?", { exact: true }).click();
+  await expect(dialog.getByText(/Generated claims were withheld/)).toBeVisible();
+  await dialog.getByText("View evidence excerpts", { exact: true }).click();
+  await expect(dialog.getByText("Original excerpt from the filing.", { exact: true })).toBeVisible();
+});
+
+test("keeps same-company rebuilding gated while the evidence bank remains usable", async ({ page }) => {
+  await page.route("**/companies/1/corpus", (route) => route.fulfill({ json: {
+    readiness: "processing", stageCounts: { parsed: 1 }, structuredFactsComplete: false, exclusions: [], failures: [], coverage: { missingManifests: 0 }, externalEmbeddingEstimate: null,
+  } }));
+  await page.goto("/records?company=1");
+  await page.getByRole("button", { name: "Ask the filings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ask the filings", exact: true });
+  await expect(dialog.getByText("Preparing evidence", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Ask", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Back to evidence", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Filing library" })).toBeVisible();
+});
+
+test("keeps the answer dialog usable on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/records?company=1");
+  await page.getByRole("button", { name: "Ask the filings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ask the filings", exact: true });
+  await dialog.getByLabel("Question", { exact: true }).fill("What does Northstar do?");
+  await dialog.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "AI summary", exact: true })).toBeVisible();
+  const bounds = await dialog.boundingBox();
+  expect(bounds!.width).toBeLessThanOrEqual(390);
+  expect(bounds!.height).toBeLessThanOrEqual(844);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expectAccessible(page);
+  await page.screenshot({ path: "test-results/ask-filings-mobile.png" });
 });
 
 test("requires explicit confirmation before deleting a corpus", async ({ page }) => {
