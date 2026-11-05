@@ -54,6 +54,9 @@ describe("loadConfig", () => {
 describe("bounded AI controls", () => {
   const base = { DATABASE_URL: "postgres://test:test@localhost/test" };
   it("rejects indefinite residency, oversized batches, and unusable context/output budgets", () => {
+    expect(loadConfig(base).aiVerificationMaxOutputTokens).toBe(2048);
+    expect(loadConfig({ ...base, AI_CHAT_CONTEXT_WINDOW: "2048", AI_CHAT_MAX_OUTPUT_TOKENS: "512" }).aiVerificationMaxOutputTokens).toBe(768);
+    expect(() => loadConfig({ ...base, AI_VERIFICATION_MAX_OUTPUT_TOKENS: "8192" })).toThrow("512 tokens");
     expect(() => loadConfig({ ...base, AI_MODEL_KEEP_ALIVE_SECONDS: "-1" })).toThrow();
     expect(() => loadConfig({ ...base, AI_EMBEDDING_BATCH_SIZE: "1000" })).toThrow();
     expect(() => loadConfig({ ...base, AI_CHAT_CONTEXT_WINDOW: "1024", AI_CHAT_MAX_OUTPUT_TOKENS: "1024" })).toThrow("512 tokens");

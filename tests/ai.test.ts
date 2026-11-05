@@ -20,12 +20,19 @@ describe("OllamaClient", () => {
     const requests: Record<string, unknown>[] = [];
     const client = new OllamaClient({ baseUrl: "http://ollama:11434", timeoutMs: 1000, keepAliveSeconds: 45,
       fetch: (async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return jsonResponse(requests.length === 1
-        ? { message: { content: "ok" }, load_duration: 123, prompt_eval_count: 10, eval_count: 2 }
+        ? { message: { content: "ok" }, load_duration: 123, prompt_eval_count: 10, eval_count: 2, done_reason: "length" }
         : { embeddings: [[1, 2]] }); }) as typeof fetch });
-    await expect(client.chat({ model: "chat", messages: [], temperature: 0, contextWindow: 4096, maxOutputTokens: 512 })).resolves.toMatchObject({ loadDurationNs: 123, promptTokens: 10, outputTokens: 2 });
+    await expect(client.chat({ model: "chat", messages: [], temperature: 0, contextWindow: 4096, maxOutputTokens: 512 })).resolves.toMatchObject({ loadDurationNs: 123, promptTokens: 10, outputTokens: 2, doneReason: "length" });
     await client.embed({ model: "embed", inputs: ["text"] });
     expect(requests[0]).toMatchObject({ keep_alive: "45s", options: { num_ctx: 4096, num_predict: 512, temperature: 0 } });
     expect(requests[1]).toMatchObject({ keep_alive: "45s", truncate: false });
+  });
+  it("passes a JSON schema to Ollama instead of requesting arbitrary JSON", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ message: { content: '{"interpretation":[]}' } }));
+    const client = new OllamaClient({ baseUrl: "http://ollama:11434", timeoutMs: 1000, fetch });
+    const schema = { type: "object", properties: { interpretation: { type: "array", items: { type: "object" } } }, required: ["interpretation"] };
+    await client.chat({ model: "chat", messages: [], responseFormat: "json", responseSchema: schema });
+    expect(JSON.parse(fetch.mock.calls[0][1].body).format).toEqual(schema);
   });
   it("normalizes model, chat, and embedding responses", async () => {
     const fetch = vi.fn()

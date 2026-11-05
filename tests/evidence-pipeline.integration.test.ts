@@ -358,6 +358,15 @@ describe.skipIf(!databaseUrl)("evidence lifecycle (PostgreSQL)", () => {
     expect(answered.json()).toMatchObject({ status: "answered", findings: [{ citations: ["C1"] }], citations: [{ label: "C1", locator: { normalizedDocumentId: expect.any(String) } }], modelRunId: expect.any(String) });
     expect(await sql`SELECT validation_status, cited_source_ids FROM model_runs`).toMatchObject([{ validation_status: "support_checked", cited_source_ids: ["C1"] }]);
     expect((await sql`SELECT raw_output FROM model_runs`)[0].raw_output.verificationEvidence[0].locator.verificationContext).toMatchObject({ clipped: true });
+    const runId = answered.json().modelRunId;
+    const diagnostic = await questionApp.inject({ url: `/api/v1/companies/${item.company_id}/model-runs/${runId}/diagnostics` });
+    expect(diagnostic.statusCode).toBe(200);
+    expect(diagnostic.json()).toMatchObject({ currentPromptVersion: "grounded-answer-v4", stage: "supported_claims_under_current_checks", acceptedClaims: 1 });
+    expect(diagnostic.body).not.toContain('"content"');
+    expect(diagnostic.json().claims).toBeUndefined();
+    const detailed = await questionApp.inject({ url: `/api/v1/companies/${item.company_id}/model-runs/${runId}/diagnostics?includeClaims=true` });
+    expect(detailed.json().claims).toMatchObject([{ unverifiedDiagnosticText: true, quotes: [{ matchesCitedPassage: true }] }]);
+    expect((await questionApp.inject({ url: `/api/v1/companies/999/model-runs/${runId}/diagnostics` })).statusCode).toBe(404);
     await sql`INSERT INTO work_items (job_id, company_id, work_type) VALUES (${item.job_id}, ${item.company_id}, 'fetch_metadata')`;
     const rebuilding = await questionApp.inject({ method: "POST", url: `/api/v1/companies/${item.company_id}/questions`,
       headers: Object.fromEntries(new Headers(init.headers)), payload: init.body as string });

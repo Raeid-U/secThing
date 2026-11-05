@@ -171,3 +171,106 @@ The initial target is a responsive evidence UI, bounded memory/request pressure,
 no repeated chat load between generation and verification, correct period/form/
 cutoff filtering, exact source reopening, and no accepted unsupported claims in the
 pilot set. This small set cannot establish universal grounding or hardware speed.
+
+## Read-only audit diagnosis — 2026-11-05
+
+When every question falls back, diagnose the recorded stage before changing the
+acceptance policy or increasing context. A malformed JSON response, an exhausted
+output limit, a rejected quote, and a genuinely unsupported claim require different
+fixes. The initial gateway denial was resolved on retry, but `docker.internal` has no DNS
+entry. Use `http://host.docker.internal:3000` and `:8080` from this environment.
+Both services and the frontend API proxy returned HTTP 200.
+
+Live diagnostic on company 4 (LINC), with `qwen2.5:3b`, reproduced two failures:
+“What does Lincoln Educational Services do?” (run 13, 13.80s) and “What recent
+disclosures did this company file?” (run 14, 5.52s). Both returned
+`interpretation contains an invalid statement.` Corpus status was
+`ready_with_exclusions`, with 764/764 chunks embedded and zero active evidence
+work. This establishes a generation-contract failure before support verification;
+it does not establish insufficient context or an overly strict factual verdict.
+
+The native Ollama transport now passes JSON schemas to `format` for answer and
+verification output, instead of only requesting arbitrary valid JSON. Schemas
+require arrays of sourced statement objects, supplied citation labels, and typed
+per-claim verdicts. The same schemas are included in prompt token budgeting.
+Prompt/schema versions are v4; verification prompt v2. Factual, quotation, number
+and scope acceptance checks are unchanged. JSON-only compatible transports still
+use their existing JSON mode plus the explicit prompt schema/server validation.
+The backend must load the new code before a live post-fix retest can be claimed.
+
+Run inside the already-configured backend container:
+
+```bash
+docker compose exec backend npm run diagnose:answers -- --limit 5
+```
+
+Optional: add `--company-id 1` to scope the report. The command only reads existing
+model-run audits. It does not invoke a model, modify the database, or print full
+filing passages/raw model responses/credentials. It reports the question, stored
+error, model and prompt versions, observed/estimated token counts, load timings,
+JSON/schema failures, and per-claim rejection categories. Old records are replayed
+using the current validator and marked accordingly; current environment budgets
+are explicitly not proof of the historical request limits.
+
+A JSON array of exported model-run rows can also be replayed offline:
+
+```bash
+npm run diagnose:answers -- --file /path/to/model-runs.json
+```
+
+New audits retain context/output limits, Ollama's stop reason, and parsed checks
+even when **every** claim is rejected. Restart the backend before expecting those
+new fields on newly submitted questions; existing audits remain replayable without
+a restart. `runtime_reported_output_truncation` is evidence of an output cap, not
+insufficient retrieval context. `output_limit_reached_or_matched` on older records
+is a clue using the supplied current budget, not definitive proof of truncation.
+
+Acceptance policy is unchanged by these diagnostic additions. Use the report to
+choose the next intervention: transport/schema handling, phase-specific output
+budget, evidence selection, quote handling, or substantive support policy.
+
+After the schema-fix backend restart, a bounded diagnostic is also available over
+the API, without raw filing/model text:
+
+```text
+GET /api/v1/companies/:companyId/model-runs/:modelRunId/diagnostics
+```
+
+Use the modelRunId returned by a question. The endpoint scopes the audit to that
+company and returns 404 for a mismatched company/run. In this diagnostic environment
+the working host is `host.docker.internal`, not `docker.internal`. Run 13 and 14
+are the pre-fix LINC reproduction baseline. Do not report post-fix success until
+new questions have been submitted after the backend reload.
+
+## Post-schema live diagnostic — 2026-11-05
+
+After the first backend restart, v4 was confirmed through the audit endpoint. The
+pre-fix runs had about 4.6–5.0K observed prompt tokens and only 377–573 output
+tokens. Their schema error was not caused by exhausting the configured 8K input
+window or 1K output cap.
+
+New business-question run 15 passed generation structure validation but verification
+ended with `doneReason: length` at exactly 1024 output tokens, leaving incomplete
+JSON. The verifier's observed prompt was 5527 tokens in an 8192-token window. This
+is an output-allocation failure, not a failed factual check. Run 16, repeating the
+recent-disclosures question, completed its verifier output (364 tokens) but rejected
+all four claims; inspect those actual claim/quote details before changing support
+policy. End-to-end times were 12.34s and 4.88s respectively.
+
+`AI_VERIFICATION_MAX_OUTPUT_TOKENS` now has a separate default of 2048 for the
+normal 8192-token context (automatically reduced for smaller configured contexts).
+Generation retains its 1024-token default. Evidence selection reserves the larger
+verification output before building the package; prompts are rechecked per phase.
+Verification quotes are constrained to 240 characters, and a runtime output-length
+stop is explicitly withheld even if a partial object could be parsed. No factual
+acceptance threshold was relaxed. Restart is required before judging this change.
+
+For detailed inspection, explicitly opt in to bounded **unverified** claim and
+quote text, with quote-match indicators:
+
+```text
+GET /api/v1/companies/4/model-runs/16/diagnostics?includeClaims=true
+```
+
+Or add `--include-claims` to the CLI. Default reports still omit generated prose and
+source bodies. The detailed report is diagnostic material, not an accepted answer.

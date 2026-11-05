@@ -22,6 +22,7 @@ const environmentSchema = z.object({
   AI_CHAT_API_KEY: optionalNonEmptyString,
   AI_CHAT_MODEL: optionalNonEmptyString,
   AI_CHAT_CONTEXT_WINDOW: z.coerce.number().int().positive().default(8_192),
+  AI_VERIFICATION_MAX_OUTPUT_TOKENS: optionalPositiveInteger,
   AI_CHAT_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1_024),
   AI_EMBEDDING_PROVIDER: z.preprocess((value) => value === "" ? undefined : value, z.enum(["ollama", "openai_compatible"]).optional()),
   AI_EMBEDDING_BASE_URL: z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional()),
@@ -35,7 +36,7 @@ const environmentSchema = z.object({
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(60_000),
   LOCAL_ONLY: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
 }).superRefine((environment, context) => {
-  if (environment.AI_CHAT_MAX_OUTPUT_TOKENS + 512 >= environment.AI_CHAT_CONTEXT_WINDOW)
+  if (Math.max(environment.AI_CHAT_MAX_OUTPUT_TOKENS, environment.AI_VERIFICATION_MAX_OUTPUT_TOKENS ?? 0) + 512 >= environment.AI_CHAT_CONTEXT_WINDOW)
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Chat context must leave more than 512 tokens beyond reserved output." });
   if (environment.AI_MODE === "disabled") return;
   if (!environment.AI_CHAT_BASE_URL && !environment.AI_EMBEDDING_BASE_URL) {
@@ -57,6 +58,7 @@ export type PlatformConfig = {
   aiChatModel?: string;
   aiChatContextWindow: number;
   aiChatMaxOutputTokens?: number;
+  aiVerificationMaxOutputTokens?: number;
   aiEmbeddingProvider?: "ollama" | "openai_compatible";
   aiEmbeddingBaseUrl?: string;
   aiEmbeddingApiKey?: string;
@@ -85,6 +87,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): PlatformCon
     aiChatModel: environment.AI_CHAT_MODEL,
     aiChatContextWindow: environment.AI_CHAT_CONTEXT_WINDOW,
     aiChatMaxOutputTokens: environment.AI_CHAT_MAX_OUTPUT_TOKENS,
+    aiVerificationMaxOutputTokens: environment.AI_VERIFICATION_MAX_OUTPUT_TOKENS ?? Math.min(2048, Math.floor((environment.AI_CHAT_CONTEXT_WINDOW - 512) / 2)),
     aiEmbeddingProvider: environment.AI_EMBEDDING_PROVIDER,
     aiEmbeddingBaseUrl: environment.AI_EMBEDDING_BASE_URL,
     aiEmbeddingApiKey: environment.AI_EMBEDDING_API_KEY,

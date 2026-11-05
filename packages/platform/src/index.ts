@@ -17,3 +17,4 @@ export { AiScheduler, AiBusyError } from "./ai-scheduler.js";
 export { QueryScopeError } from "./query-analysis.js";
 export { estimateTokens, estimateMessages, fitsContext } from "./ai-budget.js";
 export { validateVerification, verificationMessages, deterministicSupport } from "./answer-verification.js";
+export { diagnoseAnswerRun } from "./answer-diagnostics.js";

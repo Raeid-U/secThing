@@ -100,6 +100,11 @@ describe.skipIf(!databaseUrl)("AI scheduling and support boundary (PostgreSQL)",
     const result = await new GroundedAnswer(sql, config, provider, retrieval).answer(await company(), evidence.question);
     expect(result.status).toBe("answered");
     expect(requests).toHaveLength(2);
+    expect(requests[0].maxOutputTokens).toBe(1024);
+    expect(requests[1].maxOutputTokens).toBe(2048);
+    expect(requests[0].responseSchema).toMatchObject({ required: ["summary", "findings", "interpretation"], properties: { interpretation: { type: "array", items: { type: "object" } } } });
+    expect(requests[1].responseSchema).toMatchObject({ properties: { verdicts: { minItems: 1, maxItems: 1, items: { properties: { id: { enum: ["finding-0"] } } } } } });
+    expect(requests[0].messages[0].content).toContain("Required response schema");
     const verification = JSON.parse(requests[1].messages[1].content);
     expect(verification.claims).toHaveLength(1);
     expect(verification.sources.map((s: { label: string }) => s.label)).toEqual(["F1"]);
@@ -119,7 +124,7 @@ describe.skipIf(!databaseUrl)("AI scheduling and support boundary (PostgreSQL)",
     expect(result.status).toBe("answered");
     expect(result).toMatchObject({ summary: summaryDraft.summary, findings: [] });
     expect(chat).toHaveBeenCalledTimes(2);
-    expect((await sql`SELECT prompt_version FROM model_runs`)[0].prompt_version).toBe("grounded-answer-v3");
+    expect((await sql`SELECT prompt_version FROM model_runs`)[0].prompt_version).toBe("grounded-answer-v4");
   });
 
   it("withholds all claims on verifier failure and uses evidence-only fallback", async () => {
@@ -129,6 +134,18 @@ describe.skipIf(!databaseUrl)("AI scheduling and support boundary (PostgreSQL)",
     expect(result.status).toBe("generation_limited");
     expect(result.findings[0].statement).toBe(evidence.sources[0].text);
     expect((await sql`SELECT validation_status FROM model_runs`)[0].validation_status).toBe("evidence_only");
+  });
+
+  it("retains per-claim rejection diagnostics when all claims fail support review", async () => {
+    let count = 0;
+    const rejected = { verdicts: [{ ...approved.verdicts[0], temporal: false }] };
+    const provider = { chat: async () => ({ model: "chat", content: JSON.stringify(++count === 1 ? draft : rejected) }) };
+    const result = await new GroundedAnswer(sql, config, provider, retrieval).answer(await company(), evidence.question);
+    expect(result.status).toBe("generation_limited");
+    const [run] = await sql`SELECT raw_output FROM model_runs`;
+    expect(run.raw_output).toMatchObject({ rejectedClaims: 1, checks: [{ claimId: "finding-0", accepted: false, reasons: ["model_rejected_temporal"] }] });
+    expect(run.raw_output.verdicts).toHaveLength(1);
+    expect(run.raw_output.calls[0]).toMatchObject({ contextWindow: config.aiChatContextWindow, maxOutputTokens: config.aiChatMaxOutputTokens });
   });
 
   it("retries malformed generation once, then falls back without invoking the verifier", async () => {
@@ -160,6 +177,16 @@ describe.skipIf(!databaseUrl)("AI scheduling and support boundary (PostgreSQL)",
     expect((await result).message).toContain("Evidence rebuild");
     expect(chat).not.toHaveBeenCalled();
     await first.run(runtime, "chat", "interactive", async () => undefined);
+  });
+
+  it("withholds verification output explicitly when the runtime reports output truncation", async () => {
+    let count = 0;
+    const provider = { chat: async () => ({ model: "chat", content: JSON.stringify(++count === 1 ? draft : approved), doneReason: count === 2 ? "length" : "stop" }) };
+    const result = await new GroundedAnswer(sql, config, provider, retrieval).answer(await company(), evidence.question);
+    expect(result.status).toBe("generation_limited");
+    expect(result.limitations[0]).toContain("verification reached its 2048-token output limit");
+    const [run] = await sql`SELECT raw_output FROM model_runs`;
+    expect(run.raw_output.calls[1]).toMatchObject({ purpose: "verification", maxOutputTokens: 2048, doneReason: "length" });
   });
 
   it("avoids any inference when the complete question leaves no evidence budget", async () => {

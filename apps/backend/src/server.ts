@@ -10,6 +10,8 @@ import {
   CorpusNotReadyError,
   CompanyDataLifecycle,
   GroundedAnswer,
+  diagnoseAnswerRun,
+  answerPromptVersion,
   AiScheduler,
   AiBusyError,
   QueryScopeError,
@@ -386,6 +388,20 @@ export function buildServer(config: PlatformConfig = loadConfig(), providers: { 
     if (!approved) return reply.code(409).send({ error: "The estimate is stale. Refresh corpus status before approving." });
     const queued = await retrieval.queue(id.data, true);
     return reply.code(202).send({ approved, ...queued });
+  });
+
+  app.get("/api/v1/companies/:companyId/model-runs/:modelRunId/diagnostics", async (request, reply) => {
+    const params = z.object({ companyId: z.coerce.number().int().positive(), modelRunId: z.coerce.number().int().positive() }).safeParse(request.params);
+    const query = z.object({ includeClaims: z.enum(["true", "false"]).optional() }).safeParse(request.query);
+    if (!params.success || !query.success) return reply.code(400).send({ error: "Valid company/model-run IDs and an optional includeClaims=true|false are required." });
+    const [row] = await sql`SELECT m.id, m.company_id, c.legal_name AS company_name, m.created_at, m.prompt_version,
+      m.validation_status, m.error_message, m.raw_output FROM model_runs m JOIN companies c ON c.id = m.company_id
+      WHERE m.company_id = ${params.data.companyId} AND m.id = ${params.data.modelRunId}`;
+    if (!row) return reply.code(404).send({ error: "Model run not found for this company." });
+    return { currentPromptVersion: answerPromptVersion, currentBudgets: { contextWindow: config.aiChatContextWindow, generationOutputTokens: config.aiChatMaxOutputTokens, verificationOutputTokens: config.aiVerificationMaxOutputTokens }, ...diagnoseAnswerRun(row, {
+      contextWindow: config.aiChatContextWindow, outputTokens: config.aiChatMaxOutputTokens ?? 1024,
+      verificationOutputTokens: config.aiVerificationMaxOutputTokens, includeClaims: query.data.includeClaims === "true",
+    }) };
   });
 
   app.post("/api/v1/companies/:companyId/questions", async (request, reply) => {

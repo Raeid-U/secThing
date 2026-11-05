@@ -4,8 +4,8 @@ type FetchLike = typeof fetch;
 
 export type AiModel = { name: string; sizeBytes?: number; modifiedAt?: string };
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
-export type ChatRequest = { model: string; messages: ChatMessage[]; temperature?: number; responseFormat?: "json"; maxOutputTokens?: number; contextWindow?: number };
-export type ChatResponse = { model: string; content: string; totalDurationNs?: number; loadDurationNs?: number; promptTokens?: number; outputTokens?: number };
+export type ChatRequest = { model: string; messages: ChatMessage[]; temperature?: number; responseFormat?: "json"; responseSchema?: Record<string, unknown>; maxOutputTokens?: number; contextWindow?: number };
+export type ChatResponse = { model: string; content: string; totalDurationNs?: number; loadDurationNs?: number; promptTokens?: number; outputTokens?: number; doneReason?: string };
 export type EmbeddingRequest = { model: string; inputs: string[] };
 export type EmbeddingResponse = { model: string; embeddings: number[][] };
 export type AiRuntimeStatus = {
@@ -54,13 +54,13 @@ export class OllamaClient implements ChatProvider, EmbeddingProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const body = await this.request("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ model: request.model, messages: request.messages, stream: false, format: request.responseFormat === "json" ? "json" : undefined, keep_alive: `${this.options.keepAliveSeconds ?? 120}s`, options: { temperature: request.temperature, num_ctx: request.contextWindow, num_predict: request.maxOutputTokens } }),
+      body: JSON.stringify({ model: request.model, messages: request.messages, stream: false, format: request.responseSchema ?? (request.responseFormat === "json" ? "json" : undefined), keep_alive: `${this.options.keepAliveSeconds ?? 120}s`, options: { temperature: request.temperature, num_ctx: request.contextWindow, num_predict: request.maxOutputTokens } }),
     });
     const response = body as Record<string, unknown>;
     const message = response.message;
     const content = message && typeof message === "object" ? (message as Record<string, unknown>).content : undefined;
     if (typeof content !== "string") throw new Error("Ollama returned a chat response without message content.");
-    return { model: typeof response.model === "string" ? response.model : request.model, content, totalDurationNs: typeof response.total_duration === "number" ? response.total_duration : undefined, loadDurationNs: typeof response.load_duration === "number" ? response.load_duration : undefined, promptTokens: typeof response.prompt_eval_count === "number" ? response.prompt_eval_count : undefined, outputTokens: typeof response.eval_count === "number" ? response.eval_count : undefined };
+    return { model: typeof response.model === "string" ? response.model : request.model, content, totalDurationNs: typeof response.total_duration === "number" ? response.total_duration : undefined, loadDurationNs: typeof response.load_duration === "number" ? response.load_duration : undefined, promptTokens: typeof response.prompt_eval_count === "number" ? response.prompt_eval_count : undefined, outputTokens: typeof response.eval_count === "number" ? response.eval_count : undefined, doneReason: typeof response.done_reason === "string" ? response.done_reason : undefined };
   }
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {

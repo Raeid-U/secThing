@@ -18,7 +18,8 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "test": "vitest run",
     "test:browser": "playwright test",
-    "validate:retrieval": "tsx scripts/validate-retrieval.ts"
+    "validate:retrieval": "tsx scripts/validate-retrieval.ts",
+    "diagnose:answers": "tsx scripts/diagnose-answers.ts"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

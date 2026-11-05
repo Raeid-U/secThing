@@ -144,3 +144,19 @@ answer available while inspecting sources. Rebuilding the selected company block
 new answers while keyword search remains available. Model-written limitations are
 discarded; malformed unused metadata cannot prevent otherwise valid claims from
 reaching support verification.
+
+To diagnose evidence-only fallbacks without another inference request, run
+`docker compose exec backend npm run diagnose:answers -- --limit 5`. It reads
+existing audits and separates generation/schema, context/output-budget, quotation,
+number/date-scope and model support failures. Full source text and raw model prose
+are omitted from the report. See the guided QA pilot for interpretation.
+
+Native Ollama answer/review calls use schema-constrained JSON output so malformed
+statement arrays are not confused with unsupported facts. Citation membership and
+independent support checks still run after generation.
+
+Verification reserves its own output budget (`AI_VERIFICATION_MAX_OUTPUT_TOKENS`,
+2048 by default at an 8192-token context) rather than sharing the shorter answer
+budget. Quotes are length-bounded, and output truncation is recorded explicitly.
+Audit diagnostics support opt-in `?includeClaims=true` (or CLI `--include-claims`)
+for bounded, unverified claim/quote inspection; default reports omit that prose.
