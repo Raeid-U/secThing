@@ -1,5 +1,10 @@
 # Guided QA pilot: grounded-answer reliability
 
+**Current status (reviewed 2026-11-11): WIP; generated-answer quality is not accepted.**
+The latest post-budget cases below all fell back. See the
+[living implementation status](conversational-ai.md) for remaining work and exit
+criteria. Earlier sections preserve the sequence of findings and fixes.
+
 This is a human-assisted pilot, not a completed GPU acceptance report. The agent
 runs contract/database checks; the user runs the actual Compose/NVIDIA stack and
 reports observable results. Use one round at a time, diagnose discrepancies, then
@@ -161,8 +166,8 @@ source's report date from the period actually described in the passage.
 
 ## Acceptance and next iteration
 
-Pass only observed checks. “Not run” is different from “pass.” GPU acceptance is
-pending until the user reports results. Do not change models, enlarge context,
+Pass only observed checks. “Not run” is different from “pass.” User-observed responsiveness has been reported; generated-answer quality remains
+unaccepted after the live tests below. Do not change models, enlarge context,
 or increase residency solely to hide a failure; first use load/queue/token data to
 identify its cause. Raw excerpts with a generation limitation are a safe fallback,
 but a high fallback rate is a quality failure to investigate.
@@ -274,3 +279,33 @@ GET /api/v1/companies/4/model-runs/16/diagnostics?includeClaims=true
 
 Or add `--include-claims` to the CLI. Default reports still omit generated prose and
 source bodies. The detailed report is diagnostic material, not an accepted answer.
+
+## Post-budget live results — 2026-11-05
+
+The restarted backend confirmed 8192 input context / 1024 generation output / 2048
+verification output. All three calls below completed both phases with normal stop
+reasons and no formatting or output-truncation errors. All returned
+`generation_limited`, so generated-summary acceptance is still failing.
+
+| Model run | Question | End-to-end time | Remaining failure |
+| --- | --- | --- | --- |
+| 17 | What does Lincoln Educational Services do? | 9.19s | Extra/unrelated citations, wrong quote-to-source matches, temporal assertions |
+| 18 | What recent disclosures did this company file? | 8.34s | Generic or irrelevant claims, wrong labels, fabricated/non-verbatim quotes |
+| 19 | What revenue did Lincoln report for the quarter ended June 30, 2026? | 7.22s | Six-month/quarter confusion and mismatched quotation proof |
+
+Run 19 received two facts ending June 30, one starting January 1 and one April 1.
+Generation used the six-month total as quarterly revenue and described differing
+values as consistent. This is a real period-selection error; removing verification
+would permit an incorrect answer. The verifier itself was inconsistent on repeated
+claims, while exact-quote checks withheld the result.
+
+Next evaluate duration-aware financial selection, minimal relevant citations, and
+server-owned passage/span references for proof. These are remaining changes, not
+capabilities demonstrated by the current code. Preserve factual/period safeguards
+while simplifying the proof task for the small model. Re-run this set and targeted
+negative cases after implementation, and reassess model suitability if necessary.
+
+The latest implementation checks passed 113 tests (50 PostgreSQL integration
+cases), workspace TypeScript checks and NVIDIA Compose validation. These results
+were recorded before the November 11 documentation update; no new model evaluation
+or browser execution was performed for that update.

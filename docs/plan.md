@@ -592,23 +592,34 @@ Definition of done:
 - Answers cite source filings.
 - Unsupported answers are refused or marked as unsupported.
 
-Current reliability work (`feature/grounded-answer-reliability`, 2026-11-03):
+Current state (reviewed 2026-11-11): **WIP; real-model answer quality is not accepted.**
+The active branch is `feature/grounded-answer-reliability`. See the living
+[conversational AI status](conversational-ai.md) and [guided QA](qa-grounded-reliability.md).
 
-- Implement bounded local-runtime scheduling, finite residency, and explicit
-  context/output limits before conversational response composition.
-- Verify generated claims for factual, temporal and contextual support using
-  deterministic checks and one independent cited-evidence review; withhold claims
-  when support cannot be established.
-- Account for complete generation/retry/verification messages and output reserves.
-- Extract lightweight question scope and distinguish reporting periods, publication
-  windows and as-of cutoffs before retrieval.
-- Pilot target-GPU acceptance through [guided human QA](qa-grounded-reliability.md).
-  Automated validation does not complete this acceptance step.
-- User performance QA was reported on 2026-11-04; no noticeable ingestion slowdown
-  was observed. Conversational summaries and a separate Ask dialog now form the
-  next requested experience slice, with source-to-evidence navigation and preserved
-  current-answer state. Real-model summary acceptance remains open after fixing a
-  discarded-limitations schema gate. Durable multi-turn context remains deferred.
+Implemented:
+
+- Bounded shared local-runtime scheduling, finite residency and interactive priority.
+- Separate Ask dialog with source navigation and preserved current-answer state.
+- Schema-constrained cited summaries and an independent support review, with safe
+  evidence-only fallback and per-phase context/output budgeting.
+- Lightweight question scope extraction and audited diagnostic CLI/API access.
+
+Still required before acceptance:
+
+- [ ] Match financial reporting start/end/duration, distinguishing quarter and YTD.
+- [ ] Generate atomic source-attributed claims with minimal relevant citations.
+- [ ] Replace model quote reproduction with evaluated server-owned passage/span
+      selection; this is proposed work, not an existing capability.
+- [ ] Improve filing-question relevance and repeat representative real-model QA.
+- [ ] Confirm supported answers, correct refusals, period handling, source links
+      and latency; decide whether the tested 3B model is suitable.
+
+The last live checks (2026-11-05, model runs 17–19) completed without formatting or
+output truncation errors but all returned evidence-only fallback. The last 113
+passing automated tests establish contracts/integration, not answer-quality
+acceptance. Planning estimate: 3–5 focused implementation/QA sessions for the current
+single-question scope, subject to model evaluation. Durable multi-turn history and
+follow-up memory remain a separate phase.
 
 ### Phase 6: Dashboard and Timeline
 

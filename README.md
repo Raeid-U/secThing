@@ -2,6 +2,17 @@
 
 Self-hosted, evidence-first SEC filing research workbench. See [docs/BRD-PRD.md](docs/BRD-PRD.md) and [docs/FRD.md](docs/FRD.md) for the authoritative product and technical requirements.
 
+## Conversational AI: work in progress
+
+**Ask the filings is implemented but has not passed real-model answer-quality
+acceptance.** The dialog, local runtime scheduling, cited generation and diagnostic
+APIs are available. The latest three live QA questions all returned evidence-only
+fallbacks; financial duration selection, citation attribution and proof generation
+remain unfinished. Search and source inspection remain available.
+
+See [the conversational AI status and remaining work](docs/conversational-ai.md)
+for the latest results, scope and continuation point.
+
 ## Run secThing locally
 
 1. Copy `.env.example` to `.env` and set a non-default `POSTGRES_PASSWORD`. Keep `DATABASE_URL` aligned with that password.
